@@ -10,6 +10,17 @@
 
 [项目介绍](https://fromnextworld.github.io/ai-native-game-harness/) · [开发者指南](https://fromnextworld.github.io/ai-native-game-harness/developers.html) · [架构说明](docs/AI_GAME_ENGINE_IDEOLOGY.html) · [版本发布](https://github.com/FromNextWorld/ai-native-game-harness/releases)
 
+## 开发动态与社区
+
+在小红书查看项目演示、开发视频和最新进展，或加入 QQ 群交流 AI 游戏、参与测试。
+
+- **小红书：[@小红鼠煮大汤圆](https://www.xiaohongshu.com/user/profile/65f497a500000000050094cf)**
+- **QQ 群：1043783217**
+
+<p align="center">
+  <img src="docs/assets/xiaotangyuan-qq-group.jpg" alt="小汤圆 QQ 群二维码，群号 1043783217" width="360">
+</p>
+
 ## 项目状态
 
 项目处于开发验证阶段。当前主线版本为 `1.2.0-dev.0`；`v1.1.0` 保留历史源码快照，不代表最新安装包或已完成全部玩家体验验收。
@@ -44,6 +55,23 @@
 | Mock Game | 独立测试游戏与协议示例 | 用于自动化验证 |
 
 三款真实游戏共享接入协议，但 MOD 加载方式、权限和动作范围不同。安装与升级前请阅读[游戏安装说明](docs/xiaotangyuan/INSTALLATION.md)。本项目不是相关游戏的官方产品，也不声明与其开发商存在合作关系。
+
+## 真实游戏开发画面
+
+以下截图来自项目开发验证记录，用于展示 AI 伙伴已经进入真实游戏场景后的交互方向；它们不是对应游戏的官方宣传或合作声明。游戏名称、画面与原始素材权利归各自权利方所有。
+
+<table>
+  <tr>
+    <td width="33%"><img src="site/games/stardew-valley-giant-crop.jpg" alt="星露谷物语中小汤圆陪伴玩家观察巨大作物"><br><strong>一起见证农场成长</strong><br>AI 根据当前农场事件回应，而不是脱离存档编写结果。</td>
+    <td width="33%"><img src="site/games/stardew-valley-sunflower-flight.jpg" alt="星露谷物语向日葵田中的小汤圆互动玩法"><br><strong>不只聊天，也能参与玩法</strong><br>角色表达、游戏事件和动作能力可以组成真实的 AI 游戏体验。</td>
+    <td width="33%"><img src="site/games/stardew-valley-rainy-companion.jpg" alt="星露谷物语雨天场景中小汤圆回应环境"><br><strong>对当前环境作出回应</strong><br>天气、地点和附近事件都可以成为对话与动态剧情的事实上下文。</td>
+  </tr>
+  <tr>
+    <td width="33%"><img src="site/games/oxygen-not-included-companion.png" alt="缺氧殖民地中小汤圆陪伴复制人"><br><strong>成为殖民地的一员</strong><br>小汤圆以游戏内角色存在，能围绕复制人与殖民地的真实状态继续陪伴。</td>
+    <td width="33%"><img src="site/games/oxygen-not-included-water-skill.png" alt="缺氧中小汤圆根据水环境解锁吸水与喷水能力"><br><strong>从环境中获得新能力</strong><br>能力由真实游戏事件触发，并通过游戏规则确认是否已经学会和生效。</td>
+    <td width="33%"><img src="site/games/dont-starve-together-skill-learning.png" alt="饥荒联机版中小汤圆回应玩家捕捉蝴蝶的行动目标"><br><strong>把玩家目标转成行动</strong><br>AI 结合当前世界与可用能力理解请求，形成可继续执行和验证的行动方向。</td>
+  </tr>
+</table>
 
 ## 架构
 
@@ -134,8 +162,6 @@ pnpm smoke:desktop-startup
 问题报告请附上系统、游戏与 MOD 版本、复现步骤、预期和实际结果，以及脱敏后的日志。提交代码前请阅读 [协作规则](AGENTS.md)，并运行与改动相关的检查；请勿提交密钥、个人凭据、游戏存档或构建产物。
 
 如果项目对你有帮助，欢迎给一个 Star。这是自愿支持，不是使用或二次开发的附加条件。
-
-开发动态：[小红书](https://www.xiaohongshu.com/user/profile/65f497a500000000050094cf) · QQ 群：1043783217。
 
 ## 许可证
 

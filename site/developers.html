@@ -11,14 +11,14 @@
   <meta property="og:site_name" content="AI Native Game Harness">
   <meta property="og:title" content="AI Native Game Harness｜开发者接入">
   <meta property="og:description" content="描述游戏世界，实现一个 Adapter，复用完整 AI 游戏运行时。">
-  <meta property="og:url" content="https://qimidandapigu.github.io/ai-native-game-harness/developers.html">
-  <meta property="og:image" content="https://qimidandapigu.github.io/ai-native-game-harness/og.png">
+  <meta property="og:url" content="https://fromnextworld.github.io/ai-native-game-harness/developers.html">
+  <meta property="og:image" content="https://fromnextworld.github.io/ai-native-game-harness/og.png">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="AI Native Game Harness｜开发者接入">
   <meta name="twitter:description" content="描述游戏世界，实现一个 Adapter，复用完整 AI 游戏运行时。">
-  <meta name="twitter:image" content="https://qimidandapigu.github.io/ai-native-game-harness/og.png">
+  <meta name="twitter:image" content="https://fromnextworld.github.io/ai-native-game-harness/og.png">
   <title>AI Native Game Harness｜开发者接入</title>
-  <link rel="canonical" href="https://qimidandapigu.github.io/ai-native-game-harness/developers.html">
+  <link rel="canonical" href="https://fromnextworld.github.io/ai-native-game-harness/developers.html">
   <link rel="icon" href="logo.png">
   <link rel="stylesheet" href="styles.css?v=20260831-2">
   <script
@@ -48,7 +48,7 @@
       <a class="active" href="developers.html" aria-current="page">开发者版</a>
       <a href="ideology.html">技术理念</a>
     </div>
-    <a class="header-link" href="https://github.com/qimidandapigu/ai-native-game-harness" target="_blank" rel="noreferrer">GitHub <span>↗</span></a>
+    <a class="header-link" href="https://github.com/FromNextWorld/ai-native-game-harness" target="_blank" rel="noreferrer">GitHub <span>↗</span></a>
   </header>
 
   <main id="content">
@@ -59,7 +59,7 @@
         <h1>让你的游戏<br><em>拥有真正能行动的 AI</em></h1>
         <p class="hero-lead">不用为每款游戏重做模型、Agent、语音、视觉、记忆和工具系统。描述游戏世界，实现一个 Adapter，就能把统一的 AI 运行时接入自己的玩法。</p>
         <div class="hero-actions">
-          <a class="button primary" href="https://github.com/qimidandapigu/ai-native-game-harness/tree/main/examples/adapter-starter" target="_blank" rel="noreferrer">从 Adapter Starter 开始 <span>↗</span></a>
+          <a class="button primary" href="https://github.com/FromNextWorld/ai-native-game-harness/tree/main/examples/adapter-starter" target="_blank" rel="noreferrer">从 Adapter Starter 开始 <span>↗</span></a>
           <a class="button secondary" href="#principles">阅读技术理念</a>
         </div>
         <div class="hero-points" aria-label="开发者特点">
@@ -143,7 +143,7 @@
           <article><span>1</span><div><h3>描述世界与能力</h3><p>定义 gameId、状态 Schema、可执行动作、事件和权限范围。</p></div></article>
           <article><span>2</span><div><h3>实现 Game Adapter</h3><p>把 Harness 的观察和动作请求翻译成游戏 API；必须进程内执行的部分放进薄 Native Bridge。</p></div></article>
           <article><span>3</span><div><h3>打包并通过一致性检查</h3><p>组合 Game Pack，运行 Mock Game、Adapter conformance 和真实存档闭环。</p></div></article>
-          <a class="button secondary" href="https://github.com/qimidandapigu/ai-native-game-harness/blob/main/docs/INDEPENDENT_PLATFORM.md" target="_blank" rel="noreferrer">阅读接入文档 <span>↗</span></a>
+          <a class="button secondary" href="https://github.com/FromNextWorld/ai-native-game-harness/blob/main/docs/INDEPENDENT_PLATFORM.md" target="_blank" rel="noreferrer">阅读接入文档 <span>↗</span></a>
         </div>
         <div class="architecture-card">
           <div class="arch-title"><small>ONE RUNTIME · MANY GAMES</small><span>可替换 · 可审计 · 可扩展</span></div>
@@ -243,12 +243,12 @@
     <section class="section progress" id="status">
       <div class="section-heading">
         <div><p class="eyebrow"><span></span> CURRENT BASELINE</p><h2>可以评估接入，<br>仍在走向正式发行</h2></div>
-        <p>核心协议、Mock Game、第三方 Adapter Starter 和多游戏验证代码已经开放；Gateway 生命周期、Windows 更新客户端和轻量稳定性采集已进入当前基线，签名安装包、macOS 与真实游戏长期验收仍在推进。</p>
+        <p>FromNextWorld 维护当前 1.2.0-dev.0 开发主线。核心协议、Mock Game、Adapter Starter 和三款游戏适配已有源码；请分别核对代码测试、安装验证和真实游戏验收，不以源码提交替代发行结论。</p>
       </div>
       <div class="status-board">
         <article><span class="status done">可运行</span><h3>Core 与协议</h3><p>Harness Core、Adapter Protocol、WebSocket Host、Game Pack 注册表与一致性检查。</p></article>
         <article><span class="status done">有示例</span><h3>接入起点</h3><p>Adapter Starter、Mock Game，以及星露谷、饥荒和缺氧的不同语言实现。</p></article>
-        <article><span class="status done">自动验收</span><h3>双会话与办公成果</h3><p>已覆盖先回复、后台执行、原会话继续修改、联网证据、真实文件类型和准确打开目标；正式 Profile 也已完成本机复测。</p></article>
+        <article><span class="status done">专项测试</span><h3>双会话与办公成果</h3><p>提供双会话和办公成果测试，覆盖回答后识别、后台执行及原会话反馈。联网、文件和工具验收需满足各测试的环境前提。</p></article>
         <article><span class="status testing">开发验证</span><h3>桌面与发行</h3><p>Windows 本地安装、单实例/Gateway 退出和后台更新链已验证；公网更新源未发布，macOS 原生媒体、签名公证与真机验收尚未完成。</p></article>
       </div>
       <div class="development-cycle-note"><b>一个 Harness，官方服务按需选用</b><span>本仓库维护协议、Adapter、通用插件和本地 Desktop。官方服务发行层单向组合公共 Core，并预装可选的账号、额度与托管模型插件；不是两套互斥的开发版与商业版。预装版在「设置 → 插件」勾选或停用官方托管服务，更改后重启生效。停用后不接管官方模型与扣费入口，聊天和工作区路径保持不变。公共构建不依赖私有服务，游戏 MOD 不接触服务器密钥。</span></div>
@@ -260,8 +260,8 @@
       <h2>先让一个状态、一个动作、<br>一个真实结果跑通</h2>
       <p>从 Adapter Starter 开始，不必先设计整套 AI 世界。完成最小权威闭环之后，再逐步加入语音、记忆、技能和动态剧情。</p>
       <div class="hero-actions">
-        <a class="button primary" href="https://github.com/qimidandapigu/ai-native-game-harness/tree/main/examples/adapter-starter" target="_blank" rel="noreferrer">打开 Adapter Starter <span>↗</span></a>
-        <a class="button secondary" href="https://github.com/qimidandapigu/ai-native-game-harness" target="_blank" rel="noreferrer">查看 GitHub 项目</a>
+        <a class="button primary" href="https://github.com/FromNextWorld/ai-native-game-harness/tree/main/examples/adapter-starter" target="_blank" rel="noreferrer">打开 Adapter Starter <span>↗</span></a>
+        <a class="button secondary" href="https://github.com/FromNextWorld/ai-native-game-harness" target="_blank" rel="noreferrer">查看 GitHub 项目</a>
       </div>
     </section>
   </main>
@@ -272,7 +272,7 @@
       <span><strong>AI Native</strong><small>Game Harness</small></span>
     </div>
     <p>基于 DeepSeek Harness 构建的社区开源项目，并非 DeepSeek 官方产品。</p>
-    <div><a href="index.html">玩家版</a><a href="https://github.com/qimidandapigu/ai-native-game-harness" target="_blank" rel="noreferrer">GitHub</a><a href="https://github.com/qimidandapigu/ai-native-game-harness/blob/main/LICENSE" target="_blank" rel="noreferrer">MIT License</a></div>
+    <div><a href="index.html">玩家版</a><a href="https://github.com/FromNextWorld/ai-native-game-harness" target="_blank" rel="noreferrer">GitHub</a><a href="https://github.com/FromNextWorld/ai-native-game-harness/blob/main/LICENSE" target="_blank" rel="noreferrer">MIT License</a></div>
   </footer>
 </body>
 </html>

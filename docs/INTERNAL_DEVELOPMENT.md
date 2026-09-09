@@ -4,6 +4,13 @@
 
 本文记录架构决策、代码边界、当前真实完成度、验证结果、已知问题和发布计划。它允许包含尚未完成或验证失败的内容，不作为对外功能承诺。
 
+## 2026-09-10：维护账号与文档更新
+
+- 公共源码仓库为 `FromNextWorld/ai-native-game-harness`；GitHub Pages 地址调整为 `https://fromnextworld.github.io/ai-native-game-harness/`。
+- README 按项目概述、能力、游戏适配、架构、开发环境、贡献和许可证重新组织；不再将历史自动测试数量表述为最新验收结果。
+- 本次公共改动仅包含文档和 HTML，不吸收其他工作树的游戏或 Runtime 改动。包名、应用标识、协议和旧版本标签保持不变。
+- 官方服务仍是可选插件，公共构建不依赖私有服务。源码 PR、main 合并、Pages 部署和安装包发行分别确认；本条不是上线声明。
+
 ## 一句话内部定义
 
 AI Native Game Harness 是基于固定版本 DeepSeek Harness（DSH）构建的游戏产品发行层：DSH 负责模型、Agent、Tool、Session、凭据和权限；本项目负责游戏状态、动作安全、Adapter Protocol、Game Pack、桌面产品界面与游戏侧 Trace。

@@ -11,14 +11,14 @@
   <meta property="og:site_name" content="AI Native Game Harness">
   <meta property="og:title" content="AI Native Game Harness｜让 AI 真正进入游戏">
   <meta property="og:description" content="给单机游戏装上一个会观察、会行动、会记忆、会成长的 AI 伙伴。">
-  <meta property="og:url" content="https://qimidandapigu.github.io/ai-native-game-harness/">
-  <meta property="og:image" content="https://qimidandapigu.github.io/ai-native-game-harness/og.png">
+  <meta property="og:url" content="https://fromnextworld.github.io/ai-native-game-harness/">
+  <meta property="og:image" content="https://fromnextworld.github.io/ai-native-game-harness/og.png">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="AI Native Game Harness｜让 AI 真正进入游戏">
   <meta name="twitter:description" content="给单机游戏装上一个会观察、会行动、会记忆、会成长的 AI 伙伴。">
-  <meta name="twitter:image" content="https://qimidandapigu.github.io/ai-native-game-harness/og.png">
+  <meta name="twitter:image" content="https://fromnextworld.github.io/ai-native-game-harness/og.png">
   <title>AI Native Game Harness｜让 AI 真正进入游戏</title>
-  <link rel="canonical" href="https://qimidandapigu.github.io/ai-native-game-harness/">
+  <link rel="canonical" href="https://fromnextworld.github.io/ai-native-game-harness/">
   <link rel="icon" href="logo.png">
   <link rel="stylesheet" href="styles.css?v=20260831-2">
   <script
@@ -47,7 +47,7 @@
       <a href="developers.html">开发者版</a>
       <a href="ideology.html">技术理念</a>
     </div>
-    <a class="header-link" href="https://github.com/qimidandapigu/ai-native-game-harness" target="_blank" rel="noreferrer">GitHub <span>↗</span></a>
+    <a class="header-link" href="https://github.com/FromNextWorld/ai-native-game-harness" target="_blank" rel="noreferrer">GitHub <span>↗</span></a>
   </header>
 
   <main id="content">
@@ -247,18 +247,18 @@
         <article><span>03</span><h3>选择自己的游戏</h3><p>只下载需要的游戏内容，不必一次安装所有游戏的组件和 MOD。</p></article>
         <article><span>04</span><h3>进入游戏开始陪伴</h3><p>通过文字或语音交流，让 AI 根据当前存档和真实局面作出回应。</p></article>
       </div>
-      <div class="availability-note"><strong>当前状态</strong><span><b>v1.1.0</b> 已提供稳定源码；Windows 本地安装、数据保留和后台更新链已验证，但更新源与签名安装包尚未公开。macOS 是正式目标平台，当前仍需完成原生媒体能力、签名、公证和真机验收。官方账号与托管模型是可选插件：预装版默认启用，不需要时在「设置 → 插件」取消勾选，再配置自己的模型。仍是同一个助手，不因勾选变化切换聊天记录或工作区。</span></div>
+      <div class="availability-note"><strong>当前状态</strong><span><b>开发验证中</b>，历史标签 v1.1.0 保存源码快照，不代表最新安装包。Windows 是主要开发平台；签名发行与 macOS 验收尚未完成。官方账号与托管模型是可选插件：预装版默认启用，不需要时在「设置 → 插件」取消勾选，再配置自己的模型。仍是同一个助手，不因勾选变化切换聊天记录或工作区。</span></div>
     </section>
 
     <section class="section progress" id="progress">
       <div class="section-heading">
         <div><p class="eyebrow"><span></span> CURRENT PROGRESS</p><h2>正在从“能够运行”走向“玩家可以直接使用”</h2></div>
-        <p>项目已经开放源码和开发演示。Windows 已完成本地安装、内置 AI 运行时、卸载数据保留和更新客户端验证；macOS、正式签名发布与真实游戏长期体验继续推进。</p>
+        <p>项目由 FromNextWorld 维护，当前主线为 1.2.0-dev.0，处于开发验证阶段。三款游戏均有适配代码；具体可用范围以版本说明和验收记录为准，源码更新不等于安装包已更新。</p>
       </div>
       <div class="status-board">
-        <article><span class="status done">已跑通</span><h3>游戏 AI 基础能力</h3><p>对话、状态理解、动作结果、记忆隔离和测试游戏已经形成完整闭环。</p></article>
-        <article><span class="status done">本机已验证</span><h3>游戏里交办工作</h3><p>NPC 可以先快速回应，再在后台联网、生成真实文件并打开成果；进度询问和修改意见会接着原来的工作继续。</p></article>
-        <article><span class="status testing">现场验收中</span><h3>Windows、macOS 与真实游戏</h3><p>Windows 自动回归、安装和升级基础链已通过；macOS 原生适配、真实麦克风、游戏气泡时序、长期游玩和正式签名发行仍在继续验证。</p></article>
+        <article><span class="status done">已有实现</span><h3>游戏 AI 基础能力</h3><p>通过游戏适配连接对话、状态、动作回执与存档上下文。具体动作范围由各游戏的 MOD 决定。</p></article>
+        <article><span class="status done">已有实现</span><h3>游戏里交办工作</h3><p>NPC 先回应，再在后台处理工作；进度询问与修改继续关联原工作。模型和外部工具需要独立配置与授权。</p></article>
+        <article><span class="status testing">待持续验收</span><h3>桌面与真实游戏</h3><p>Windows 为主要开发平台。真实语音、游戏气泡时序与长期游玩需按版本验证；macOS、签名安装包和正式发行仍未完成。</p></article>
       </div>
       <div class="games">
         <span>STARDEW VALLEY</span><span>DON'T STARVE TOGETHER</span><span>OXYGEN NOT INCLUDED</span><span>MOCK GAME</span>
@@ -317,7 +317,7 @@
       <p>如果你想体验、讨论或参与后续测试，可以关注项目进展并加入交流群。正式玩家安装包准备好后，会在版本发布页明确提供。</p>
       <div class="hero-actions">
         <a class="button primary" href="#community">参与测试与交流</a>
-        <a class="button secondary" href="https://github.com/qimidandapigu/ai-native-game-harness" target="_blank" rel="noreferrer">查看 GitHub 项目 <span>↗</span></a>
+        <a class="button secondary" href="https://github.com/FromNextWorld/ai-native-game-harness" target="_blank" rel="noreferrer">查看 GitHub 项目 <span>↗</span></a>
       </div>
     </section>
   </main>
@@ -328,7 +328,7 @@
       <span><strong>AI Native</strong><small>Game Harness</small></span>
     </div>
     <p>面向单机游戏 AI 伙伴的社区开源项目，当前处于开发验证阶段。</p>
-    <div><a href="developers.html">开发者版</a><a href="https://github.com/qimidandapigu/ai-native-game-harness" target="_blank" rel="noreferrer">GitHub</a><a href="https://github.com/qimidandapigu/ai-native-game-harness/blob/main/LICENSE" target="_blank" rel="noreferrer">MIT License</a></div>
+    <div><a href="developers.html">开发者版</a><a href="https://github.com/FromNextWorld/ai-native-game-harness" target="_blank" rel="noreferrer">GitHub</a><a href="https://github.com/FromNextWorld/ai-native-game-harness/blob/main/LICENSE" target="_blank" rel="noreferrer">MIT License</a></div>
   </footer>
 </body>
 </html>

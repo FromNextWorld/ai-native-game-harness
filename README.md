@@ -1,177 +1,142 @@
 <p align="center">
-  <img src="docs/assets/ai-native-game-harness-logo.png" alt="AI Native Game Harness 小汤圆 Logo" width="128">
+  <img src="docs/assets/ai-native-game-harness-logo.png" alt="AI Native Game Harness" width="112">
 </p>
 
 # AI Native Game Harness
 
-## 让游戏里的 AI 不只会聊天，还能真正理解和参与游戏
+面向游戏开发者、MOD 作者和 AI 应用开发者的开源游戏 AI 集成框架，基于 DeepSeek Harness 连接游戏状态、角色交互、语音、受控动作与生产力工具。
 
-AI Native Game Harness 想为玩家提供一个可以进入不同游戏的 AI 伙伴：它能看懂当前局面、听懂玩家说话、记住共同经历，并在游戏允许的范围内完成真实动作。
+玩家可以在游戏中与 NPC 交流、交办工作并接收反馈；开发者通过统一的 Adapter 接入游戏，无需为每款游戏重复建设会话、模型调用与工具执行基础设施。
 
-对于游戏开发者和 MOD 作者，它提供一套可复用的 AI 游戏底座。你只需要描述自己的游戏世界、状态和可执行动作，不必为每款游戏重新开发模型接入、语音、记忆、工具调用和桌面应用。
+[项目介绍](https://fromnextworld.github.io/ai-native-game-harness/) · [开发者指南](https://fromnextworld.github.io/ai-native-game-harness/developers.html) · [架构说明](docs/AI_GAME_ENGINE_IDEOLOGY.html) · [版本发布](https://github.com/FromNextWorld/ai-native-game-harness/releases)
 
-> `v1.1.0` 稳定源码版本已经发布，保存玩家版、开发者版、完整技术理念、游戏 Harness 与多游戏接入代码。当前 `main` 在此基础上增加了 Desktop 单实例/Gateway 生命周期修复、Windows 安全自动更新和轻量稳定性采集；公网更新源、数字签名安装包与 macOS 安装包仍未正式发布。
+## 项目状态
 
-> `1.0` / `v1.0.0` 保留第一份稳定快照；`1.1` 分支、`v1.1.0` 标签与 GitHub Release 保存本次稳定源码。封版时 `main` 与 `v1.1.0` 一致，后续开发不会反向修改这两个稳定版本。
+项目处于开发验证阶段。当前主线版本为 `1.2.0-dev.0`；`v1.1.0` 保留历史源码快照，不代表最新安装包或已完成全部玩家体验验收。
 
-**[玩家版官网](https://qimidandapigu.github.io/ai-native-game-harness/)** · **[开发者版官网](https://qimidandapigu.github.io/ai-native-game-harness/developers.html)** · **[完整技术理念](docs/AI_GAME_ENGINE_IDEOLOGY.html)** · **[接入一个新游戏](docs/INDEPENDENT_PLATFORM.md)** · **[查看版本发布](https://github.com/qimidandapigu/ai-native-game-harness/releases)**
+- 仓库包含三款游戏的适配代码、Mock Game、桌面应用及自动测试。
+- Windows 是当前主要开发平台；macOS 的原生媒体能力、签名、公证和真机验收尚未完成。
+- 自动测试、源码上传、本机安装与真实游戏验收是不同环节。具体可用范围以对应版本说明和验收记录为准。
 
-## 关注小汤圆，加入交流群
+项目现由 [FromNextWorld](https://github.com/FromNextWorld) 维护。已有包名中的 `@qimidandapigu` 暂时保留，以兼容插件配置；GitHub 账号迁移不改变包名或历史提交。
 
-想看最新视频和项目动态，可以关注小红书；想交流 AI 游戏或参与测试，可以加入 QQ 群。
+## 核心能力
 
-- **小红书：[@小红鼠煮大汤圆](https://www.xiaohongshu.com/user/profile/65f497a500000000050094cf)**
-- **QQ群：1043783217**
+| 能力 | 说明 |
+| --- | --- |
+| 游戏状态接入 | 通过 Adapter 提供位置、背包、附近目标和场景等结构化信息 |
+| 受控动作执行 | 调用游戏声明的动作，以动作回执和新状态确认结果 |
+| NPC 交互 | 结合游戏上下文进行语音或文字交流；具体输入方式取决于游戏适配 |
+| 会话与记忆 | 按游戏和存档隔离上下文，支持持续交互 |
+| 技能与成长 | 提供技能学习和游戏事件接线；可用动作及解锁规则由各游戏实现决定 |
+| 工作编排 | NPC 先回复，随后在后台识别工作意图；进度与修改继续关联原工作记录 |
+| 开发与验收 | 提供 Adapter Starter、Mock Game、协议测试和专项验收脚本 |
 
-<p align="center">
-  <img src="docs/assets/xiaotangyuan-qq-group.jpg" alt="小汤圆 QQ 群二维码，群号 1043783217" width="360">
-</p>
+工作能力用于让 NPC 在玩家继续游玩的同时处理研究、写作或文件生成。外部生产力工具需要单独安装、配置与授权；未配置的工具不能视为已接入。
 
-## 玩家能得到什么
+## 游戏适配
 
-### 一个真正了解游戏的 AI 伙伴
+| 游戏 | 游戏侧实现 | 验证状态 |
+| --- | --- | --- |
+| 星露谷物语 | SMAPI / C# MOD、Adapter、小汤圆交互与动作 | 开发验证中 |
+| 饥荒联机版 | Lua MOD、启动与 Adapter 接线 | 开发验证中 |
+| 缺氧 | C# Bridge、Adapter、角色与动作接线 | 开发验证中 |
+| Mock Game | 独立测试游戏与协议示例 | 用于自动化验证 |
 
-AI 不只读取聊天内容。游戏可以把角色状态、背包、附近目标、任务和当前场景准确地告诉它，让回答建立在真实局面上。
+三款真实游戏共享接入协议，但 MOD 加载方式、权限和动作范围不同。安装与升级前请阅读[游戏安装说明](docs/xiaotangyuan/INSTALLATION.md)。本项目不是相关游戏的官方产品，也不声明与其开发商存在合作关系。
 
-### 用文字或语音一起玩
-
-玩家可以询问情况、讨论计划，也可以要求 AI 执行游戏提供的动作。动作是否成功由游戏确认，AI 不能只用一句话假装任务已经完成。
-
-### 跨存档的共同经历
-
-记忆和会话按游戏与存档隔离。重新进入同一个存档时，AI 可以接着之前的交流继续陪伴；切换存档时不会串用另一段经历。
-
-### 剧情由当前局面实时生成
-
-项目的核心不是播放一份预先写死的任务表。同一个 DSH Session 会根据 Game Pack 中的世界观与角色边界、玩家选择和 Adapter 返回的当前事实，滚动生成接下来 1–3 个短剧情片段。Story Runtime 负责校验和按 `gameId + saveId` 保存；目标是否完成仍必须由游戏状态证明。
-
-### 会学习，但不会乱学
-
-AI 可以把多步操作写成受限的技能流程，处理条件判断、有限重复和失败回退。只有在真实游戏中完整试跑成功，技能才会保存；失败尝试只用于改进和排错。
-
-### 边玩边把工作交给 Harness
-
-**让 AI 上班，让人回家玩游戏。** 这是 Harness 的一项可选工作编排能力：玩家先和游戏里的小汤圆正常交流；当前回复结束后，后台再识别长期工作意图，并创建或恢复独立 Worker DSH Session。公开进度和结果会返回原陪伴 Session，因此同一套能力也能被其他 NPC、桌面宠物或陪伴角色复用。
-
-该能力已独立维护在 [dsh-agh-work-orchestrator](https://github.com/qimidandapigu/dsh-agh-work-orchestrator)，运行时包名为 `@qimidandapigu/dsh-work-orchestrator`。当前 `0.1.7` 发布的是 Git 源码，尚未声明已发布到 npm；它不建立第二套任务中心，工作事实、对话和成果仍由 DSH Session 与 Workspace 保存。
-
-AI 不应该只是让人一天完成三天的工作。生产力继续提高以后，人应该得到更多时间去游戏、娱乐、创造和生活；人负责提出目标、判断方向，繁琐的执行交给 AI。
-
-### 开源核心与产品服务分层
-
-本仓库只维护可以公开复用的本地核心：游戏协议、Adapter、DSH 插件、NPC 工作编排、桌面基础能力和自动验收。账号、额度、支付以及托管模型路由不是公共核心的依赖，也不会把服务器密钥或商业实现放进游戏 MOD。
-
-正式产品可以在开源核心之上增加可选的登录、额度、支付和托管模型服务，但依赖方向始终是单向的：产品发行版消费一个固定的公开版本，公共仓库不会反向依赖私有服务。只使用开源版本的开发者仍然可以自行配置模型并运行本地能力。
-
-### 一个应用连接多款游戏
-
-桌面应用可以在通用 Harness 页面和游戏专属页面之间切换；不同游戏包继续按需安装，不需要把所有适配器和 MOD 一次性下载下来。
-
-## 对游戏开发者和 MOD 作者的价值
-
-- **更快做出 AI 玩法**：把精力放在角色、剧情、规则和游戏专属动作上。
-- **复用动态剧情生成器**：在 Game Pack 中提供世界观与叙事约束，不必把整条剧情树写死。
-- **复用成熟能力**：统一使用模型、语音、视觉、记忆、会话和工具系统。
-- **不绑定单一模型厂商**：游戏接入面向能力，而不是写死某一家 API。
-- **支持不同技术栈**：游戏侧可以使用 C#、Lua、C++ 或其他语言。
-- **更容易测试和排错**：每次动作都能关联请求、结果、耗时和更新后的游戏状态。
-- **按游戏独立发布**：每个游戏包可以单独安装、升级和卸载。
-
-## 目标使用体验
+## 架构
 
 ```text
-安装 AI Native Game Harness
-        ↓
-选择游戏并安装对应游戏包
-        ↓
-进入游戏，用文字或语音和 AI 对话
-        ↓
-AI 理解当前状态，生成或延续短剧情，并回答或请求执行动作
-        ↓
-游戏确认结果，AI 继续观察、协作和学习
+游戏 / MOD
+    │ 状态、动作与回执
+    ▼
+Game Adapter ── Harness / DeepSeek Harness ── 模型、语音与工具
+                          │
+                          ├─ NPC 交互与存档上下文
+                          └─ Work Orchestrator → 工作 Session / Workspace
 ```
 
-这套体验仍在开发中。当前源码和本地安装包已经具备主要产品组件，但在正式数字签名、真实游戏长期验收和公开 Release 完成前，仍不应当写成普通玩家正式版。
+- **游戏层**：决定游戏事实、可执行动作和操作结果。
+- **Harness 层**：连接 Adapter、插件与桌面宿主，保留请求和结果的可追踪关系。
+- **DSH 层**：复用 Session、Workspace、Agent 与工具能力。
+- **Work Orchestrator**：在 NPC 回答之后识别工作需求，创建或复用独立工作 Session，并将公开反馈送回角色。它不引入独立任务数据库。
 
-## 当前游戏
+动态剧情与技能能力受 Game Pack 及游戏规则约束；模型生成的描述不能替代游戏返回的成功证据。
 
-| 游戏 | 想实现的体验 | 当前阶段 |
-| --- | --- | --- |
-| 星露谷物语 | 可对话、能理解农场生活并陪伴成长的小汤圆 | 开发验证中 |
-| 饥荒联机版 | 能观察生存状态、协助执行任务和学习技能的伙伴 | 开发验证中 |
-| 缺氧 | 能理解殖民地、复制人和建造任务的悬浮 AI 伙伴 | 开发验证中 |
-| Mock Game | 用于验证连接、动作、安全和状态更新 | 自动测试可用 |
+## 可选官方服务
 
-## 真实游戏开发画面
+开源核心可以使用自行配置的模型和工具，不依赖官方账号、余额或支付服务。
 
-以下截图来自项目开发验证记录，用于展示 AI 伙伴已经进入真实游戏场景后的交互方向；它们不是对应游戏的官方宣传或合作声明。游戏名称、画面与原始素材权利归各自权利方所有。
+预装官方服务的发行包通过可选 DSH 插件提供登录、额度与托管模型入口。用户可在「设置 → 插件」停用官方托管服务，再配置自己的模型。插件状态变化不应切换或删除会话与工作区；已被上游接收的请求不会因此自动撤销。
 
-<table>
-  <tr>
-    <td width="33%"><img src="site/games/stardew-valley-giant-crop.jpg" alt="星露谷物语中小汤圆陪伴玩家观察巨大作物"><br><strong>一起见证农场成长</strong><br>AI 根据当前农场事件回应，而不是脱离存档编写结果。</td>
-    <td width="33%"><img src="site/games/stardew-valley-sunflower-flight.jpg" alt="星露谷物语向日葵田中的小汤圆互动玩法"><br><strong>不只聊天，也能参与玩法</strong><br>角色表达、游戏事件和动作能力可以组成真实的 AI 游戏体验。</td>
-    <td width="33%"><img src="site/games/stardew-valley-rainy-companion.jpg" alt="星露谷物语雨天场景中小汤圆回应环境"><br><strong>对当前环境作出回应</strong><br>天气、地点和附近事件都可以成为对话与动态剧情的事实上下文。</td>
-  </tr>
-  <tr>
-    <td width="33%"><img src="site/games/oxygen-not-included-companion.png" alt="缺氧殖民地中小汤圆陪伴复制人"><br><strong>成为殖民地的一员</strong><br>小汤圆以游戏内角色存在，能围绕复制人与殖民地的真实状态继续陪伴。</td>
-    <td width="33%"><img src="site/games/oxygen-not-included-water-skill.png" alt="缺氧中小汤圆根据水环境解锁吸水与喷水能力"><br><strong>从环境中获得新能力</strong><br>能力由真实游戏事件触发，并通过游戏规则确认是否已经学会和生效。</td>
-    <td width="33%"><img src="site/games/dont-starve-together-skill-learning.png" alt="饥荒联机版中小汤圆回应玩家捕捉蝴蝶的行动目标"><br><strong>把玩家目标转成行动</strong><br>AI 结合当前世界与可用能力理解请求，形成可继续执行和验证的行动方向。</td>
-  </tr>
-</table>
+公共仓库不包含私有账号、计费、支付实现或服务端密钥。官方托管能力的存在不代表生产服务、支付或签名安装包已经正式开放。
 
-## 产品原则
+## 开发环境
 
-- **游戏事实优先**：物品、金钱、任务、位置和胜负以游戏返回结果为准。
-- **玩家保持控制权**：游戏只开放明确允许的动作，敏感能力需要授权。
-- **本机连接优先**：游戏与桌面应用默认通过本机通信，不向局域网公开端口。
-- **按需安装**：不同游戏的能力独立管理，不强迫用户下载无关内容。
-- **工作能力独立**：Work Orchestrator 是通用 DSH 插件，不与小汤圆角色、某个游戏或 Desktop UI 绑定。
-- **过程可解释**：可以查看 AI 调用了什么、游戏返回了什么，以及失败发生在哪一步。
+- Windows 为当前主要开发环境。
+- Node.js `22.19+`。
+- pnpm `10.28.2`，以根目录 `packageManager` 为准。
+- 真实游戏验证需要合法安装的游戏及对应 MOD 环境。
 
-## 现在可以使用吗？
-
-| 使用者 | 当前建议 |
-| --- | --- |
-| 普通玩家 | 可以查看 `v1.1.0` 稳定源码；Windows 本地安装与升级链已验证，但尚未签名或作为 Release 资产公开发布，macOS 仍在适配 |
-| 游戏开发者 / MOD 作者 | 可以使用 Adapter Starter 和 Mock Game 评估接入方式 |
-| 项目贡献者 | 可以运行源码、自动测试和桌面演示 |
-
-当前 `main` 合并后的基线覆盖 45 项集成测试和 22 项平台测试，并通过独立 Work Orchestrator 与小汤圆插件专项测试；饥荒、反馈服务和缺氧 Adapter 也有各自的自动检查。Desktop 现在会阻止重复实例争抢 `33145`，退出时按顺序关闭 Gateway/Runtime，并在打包后的 Windows 版本中后台检查更新。轻量稳定性脚本可记录进程资源、Gateway 连通和重连证据；真实麦克风、游戏内气泡时序、连续一小时游玩和 macOS 现场体验仍需人工验收。
-
-## 开发者体验
-
-需要 Node.js 22.19+ 和 pnpm 10.28.2：
+### 获取源码与检查
 
 ```powershell
-git clone https://github.com/qimidandapigu/ai-native-game-harness.git
+git clone https://github.com/FromNextWorld/ai-native-game-harness.git
 cd ai-native-game-harness
 pnpm install --frozen-lockfile
 pnpm check
+```
+
+### 桌面开发
+
+```powershell
+pnpm desktop:dev:prepare
+pnpm desktop:dev
+```
+
+首次使用需准备开发 Runtime。修改插件源码后，执行 `pnpm desktop:dev:sync` 并重新启动开发版。准备脚本可能下载和构建依赖；开发启动不等于生成正式安装包。
+
+### 专项验证
+
+```powershell
 pnpm test:dual-session
 pnpm test:office-work
 pnpm smoke:desktop-startup
-pnpm smoke:dsh-story
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/real-game-stability-lite.ps1 -Game auto -DurationMinutes 60
-pnpm desktop:dev:prepare
-pnpm desktop:dev
-pnpm demo:prepare
 ```
 
-`desktop:dev:prepare` 只准备源码开发所需的插件和增量构建，不安装独立生产 Runtime，也不生成 NSIS；日常修改 Desktop 后直接运行 `desktop:dev`。修改小汤圆、Work Orchestrator、ONI Adapter 或共享插件后，执行一次 `desktop:dev:sync` 再重新启动开发版。完整 `desktop:prepare / pack / dist` 只用于发行目录、安装器和最终发布验证。
+专项测试的环境要求与人工验收步骤见[游戏内办公验收](docs/testing/GAME_DEMO_ACCEPTANCE.md)和[办公成果验收](docs/testing/OFFICE_WORK_GOLDEN_ACCEPTANCE.md)。自动检查不能替代真实麦克风、游戏内气泡时序和长期存档测试。
 
-`pnpm demo:prepare` 会完成自动检查、准备隔离演示 Profile、生成演示话术并启动 Desktop，但不会启动或修改星露谷存档。最后约 10 分钟的真实游戏检查见[游戏内办公演示验收](docs/testing/GAME_DEMO_ACCEPTANCE.md)，办公成果契约见[办公模块黄金验收](docs/testing/OFFICE_WORK_GOLDEN_ACCEPTANCE.md)。
+## 目录结构
 
-第三方游戏接入可以从 [`examples/adapter-starter`](examples/adapter-starter) 开始。
+| 路径 | 职责 |
+| --- | --- |
+| `apps/desktop/` | 桌面宿主与开发入口 |
+| `packages/` | 协议、运行时和共享能力 |
+| `plugins/` | DSH 插件与工作编排 |
+| `games/` | 游戏适配、MOD 和接入脚本 |
+| `examples/adapter-starter/` | 第三方 Adapter 示例 |
+| `docs/` | 架构、安装与验收文档 |
+| `site/` | GitHub Pages 玩家版、开发者版与理念页面 |
 
-## 进一步了解
+## 文档
 
-- [产品定位与完整介绍](docs/AI_GAME_ENGINE_IDEOLOGY.html)
-- [第三方游戏接入说明](docs/INDEPENDENT_PLATFORM.md)
-- [游戏安装与升级](docs/xiaotangyuan/INSTALLATION.md)
-- [常见问题与排错](docs/xiaotangyuan/TROUBLESHOOTING.md)
-- [内部开发状态与技术决策](docs/INTERNAL_DEVELOPMENT.md)
-- [轻量真实游戏稳定性验收](docs/testing/LIGHTWEIGHT_GAME_STABILITY.md)
+- [接入新游戏](docs/INDEPENDENT_PLATFORM.md)
+- [安装与升级](docs/xiaotangyuan/INSTALLATION.md)
+- [故障排查](docs/xiaotangyuan/TROUBLESHOOTING.md)
+- [技术状态与决策](docs/INTERNAL_DEVELOPMENT.md)
+- [真实游戏稳定性验收](docs/testing/LIGHTWEIGHT_GAME_STABILITY.md)
 
-## License
+## 参与贡献
 
-[MIT](LICENSE)
+欢迎通过 [Issues](https://github.com/FromNextWorld/ai-native-game-harness/issues) 报告问题或讨论需求，通过 Pull Request 提交改进。
+
+问题报告请附上系统、游戏与 MOD 版本、复现步骤、预期和实际结果，以及脱敏后的日志。提交代码前请阅读 [协作规则](AGENTS.md)，并运行与改动相关的检查；请勿提交密钥、个人凭据、游戏存档或构建产物。
+
+如果项目对你有帮助，欢迎给一个 Star。这是自愿支持，不是使用或二次开发的附加条件。
+
+开发动态：[小红书](https://www.xiaohongshu.com/user/profile/65f497a500000000050094cf) · QQ 群：1043783217。
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。第三方游戏、素材和依赖的权利及许可证归各自权利方；本仓库许可证不替代其授权条件。

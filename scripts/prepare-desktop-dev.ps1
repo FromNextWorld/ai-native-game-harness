@@ -66,6 +66,9 @@ try {
   Pop-Location
 }
 
+& (Join-Path $repoRoot 'games/dont-starve-together/scripts/build-player-package.ps1') -OutputDirectory (Join-Path $repoRoot '.artifacts/dst-package') -SkipBuild
+if ($LASTEXITCODE -ne 0) { throw 'DST development TS package failed' }
+
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
 $packages = @(
   @{ Root = (Join-Path $repoRoot $manifest.workOrchestrator.source); Name = "qimidandapigu-dsh-work-orchestrator-$($manifest.workOrchestrator.expectedVersion).tgz"; Hoisted = $false },

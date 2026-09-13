@@ -17,13 +17,16 @@ namespace StardewAgentMod.Game.Actions
     {
         public string Intent => "water_all";
 
-        public ActionResult Execute(GameLocation location)
+        public ActionResult Execute(GameLocation location) => Execute(location, null);
+
+        public ActionResult Execute(GameLocation location, FieldScope? scope)
         {
             var targets = new List<Vector2>();
             int count = 0;
 
             void WaterIfDry(HoeDirt dirt, Vector2 tile)
             {
+                if (scope != null && !scope.Contains((int)tile.X, (int)tile.Y)) return;
                 if (dirt.state.Value != HoeDirt.dry) return;
                 dirt.state.Value = HoeDirt.watered;
                 targets.Add(new Vector2(

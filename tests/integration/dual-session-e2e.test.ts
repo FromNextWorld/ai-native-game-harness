@@ -66,6 +66,7 @@ function workHandle(
         }
       }
       events.push(assistantEvent(events.length, typeof response === 'string' ? response : response.text))
+      session.append('turn/end', { reason: { kind: 'completed' } })
     },
     whenIdle: async () => undefined,
     cancel: () => undefined,

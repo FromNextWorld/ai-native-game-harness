@@ -68,4 +68,35 @@ describe('Volcengine speech low-latency paths', () => {
     expect(fetchMock).toHaveBeenCalledOnce()
     expect(fetchMock.mock.calls[0]?.[0]).toContain('/recognize/flash')
   })
+
+  it('uses and records the shared voice for each game without leaking text or credentials', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => new Response('{"data":"AQI="}\n', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const ctx = context()
+    const voice = 'ICL_uranus_zh_female_yuanqitianmei_tob'
+    const provider = new VolcengineSpeechProvider(ctx, resolveConfig({ speech: { ttsResourceId: 'seed-tts-2.0', ttsVoice: voice } }).speech)
+    for (const processId of [100, 200, 300]) {
+      await provider.synthesize({ text: '私密测试话语', trace: { processId, interactionId: `turn-${processId}`, playbackId: `play-${processId}` } }, new AbortController().signal)
+    }
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(JSON.parse(init.body as string).req_params.speaker).toBe(voice)
+      expect(new Headers(init.headers).get('X-Api-Resource-Id')).toBe('seed-tts-2.0')
+    }
+    const log = vi.mocked(ctx.logger.info).mock.calls.flat().join('\n')
+    expect(log).toContain('synthesis.complete')
+    expect(log).toContain('"processId":300')
+    expect(log).toContain(voice)
+    expect(log).not.toContain('test-key')
+    expect(log).not.toContain('私密测试话语')
+  })
+
+  it('reports synthesis failure without silently switching voice or provider', async () => {
+    const fetchMock = vi.fn(async () => new Response('unavailable', { status: 503 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const ctx = context()
+    const provider = new VolcengineSpeechProvider(ctx, resolveConfig().speech)
+    await expect(provider.synthesize({ text: '你好' }, new AbortController().signal)).rejects.toThrow('HTTP 503')
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(vi.mocked(ctx.logger.info).mock.calls.flat().join('\n')).toContain('synthesis.failed')
+  })
 })

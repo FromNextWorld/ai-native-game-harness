@@ -3,14 +3,14 @@ import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import type { LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { performance } from 'node:perf_hooks'
-import screenshot from 'screenshot-desktop'
+import { reportRuntimeError } from '../error-diagnostics.js'
 import type { ResolvedConfig } from '../../config.js'
 import { WindowsMediaHost } from '../media/windows-media-host.js'
 import type { BinaryAsset } from '../providers/contracts.js'
 
 export interface MultimodalInput {
   selection: ModelSelection
-  image: ImageAttachmentRef
+  image?: ImageAttachmentRef
   timing: {
     modelSelectionMs: number
     captureMs: number
@@ -36,6 +36,16 @@ export class MultimodalRouter {
   ) {}
 
   private async findImageModel(signal: AbortSignal): Promise<ModelSelection | undefined> {
+    if (this.config.strictModel !== false) {
+      const selection: ModelSelection = { provider: this.config.provider, model: this.config.model }
+      const info = await this.ctx.llm.resolveModelInfo(selection.provider, selection.model, signal)
+      if (this.config.enabled && !acceptsImages(info)) throw new Error('配置的游戏模型不支持图片输入')
+      const effort = this.config.reasoningEffort ?? 'off'
+      // Non-reasoning routes do not accept even an explicit "off" parameter.
+      if (effort === 'off' && info.reasoning === undefined) return selection
+      if (!info.reasoning?.efforts.some(item => item.id === effort)) throw new Error(`配置的游戏模型不支持思考强度：${effort}`)
+      return { ...selection, reasoningEffort: effort as ModelSelection['reasoningEffort'] }
+    }
     const preferred = this.ctx.agentDefaultModel.currentSelection()
     const configured = { provider: this.config.provider, model: this.config.model }
     const defaultModelKey = `${configured.provider}\u0000${configured.model}\u0000${preferred.provider}\u0000${preferred.model}`
@@ -83,26 +93,25 @@ export class MultimodalRouter {
   }
 
   async selectModel(signal: AbortSignal): Promise<ModelSelection> {
-    if (!this.config.enabled) throw new Error('当前游戏会话需要启用视觉输入')
     const selection = await this.findImageModel(signal)
     if (selection === undefined) throw new Error('没有可用的图片输入模型')
     return selection
   }
 
   async prepareProcess(processId: number | undefined, signal: AbortSignal): Promise<MultimodalInput> {
-    if (!this.config.enabled) throw new Error('当前游戏会话需要启用视觉输入')
     const selectionStarted = performance.now()
     const selection = await this.selectModel(signal)
     const captureStarted = performance.now()
-    const image: BinaryAsset = processId === undefined
-      ? { bytes: new Uint8Array(await screenshot({ format: 'png' })), mediaType: 'image/png' }
-      : await this.media.captureProcessWindow(processId, this.config.maxWidth, signal)
-    if (image.mediaType !== 'image/png') throw new Error(`Windows 媒体服务返回了不支持的截图格式：${image.mediaType}`)
+    const textOnly = (): MultimodalInput => ({ selection, timing: { modelSelectionMs: captureStarted - selectionStarted, captureMs: performance.now() - captureStarted, attachmentMs: 0 } })
+    if (!this.config.enabled || processId === undefined) return textOnly()
+    try {
+    const image: BinaryAsset = await this.media.captureProcessWindow(processId, this.config.maxWidth, AbortSignal.any([signal, AbortSignal.timeout(5000)]))
+    if (image.mediaType !== 'image/png' && image.mediaType !== 'image/jpeg') throw new Error(`Windows 媒体服务返回了不支持的截图格式：${image.mediaType}`)
     const attachmentStarted = performance.now()
     const attachment = await this.ctx.attachments.saveImage({
       data: image.bytes,
-      mediaType: 'image/png',
-      name: 'game-window.png',
+      mediaType: image.mediaType,
+      name: image.mediaType === 'image/png' ? 'game-window.png' : 'game-window.jpg',
     })
     const finished = performance.now()
     return {
@@ -113,6 +122,11 @@ export class MultimodalRouter {
         captureMs: attachmentStarted - captureStarted,
         attachmentMs: finished - attachmentStarted,
       },
+    }
+    } catch (error) {
+      signal.throwIfAborted()
+      reportRuntimeError(error, { stage: 'agent.vision.text-only', processId, recovered: true })
+      return textOnly()
     }
   }
 }

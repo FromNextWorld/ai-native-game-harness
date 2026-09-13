@@ -44,6 +44,16 @@ afterEach(async () => {
 })
 
 describe('game gateway lifecycle', () => {
+  it('shows the supplied diagnostic reference without exposing the raw error', () => {
+    const gateway = createGateway(0)
+    vi.spyOn(gateway as any, 'connectionForProcess').mockReturnValue({ adapter: { gameId: 'stardew-valley' } })
+    const notify = vi.spyOn(gateway as any, 'notify').mockImplementation(() => undefined)
+    gateway.failed(42, 'private backend failure sk-dummy-test-credential', '12345678-aaaa-bbbb-cccc-123456789abc')
+    expect(notify).toHaveBeenCalledWith(expect.anything(), 'assistant.error', {
+      message: expect.stringContaining('错误编号：12345678'), errorId: '12345678-aaaa-bbbb-cccc-123456789abc',
+    })
+    expect(JSON.stringify(notify.mock.calls)).not.toContain('sk-dummy')
+  })
   it('retries a transient port collision and binds after the old owner exits', async () => {
     vi.spyOn(console, 'info').mockImplementation(() => undefined)
     const blocker = createServer()

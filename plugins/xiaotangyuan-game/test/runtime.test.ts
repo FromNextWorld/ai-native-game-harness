@@ -2,15 +2,24 @@ import { describe, expect, it } from 'vitest'
 import { resolveConfig } from '../src/config.js'
 import { readAdapterHello, readStateUpdate, readStateUpdateSaveId } from '../src/protocol/game.js'
 import { buildPcm16Wav } from '../src/runtime/speech/wav.js'
-import { gatewayReadyParams, globalPushToTalkProcessIds, matchPostReplyVoiceCommand } from '../src/gateway/game-gateway.js'
+import { gatewayReadyParams, globalPushToTalkProcessIds, matchPostReplyVoiceCommand, mediaHostProcessIds, shouldWarmCompanionSession } from '../src/gateway/game-gateway.js'
 
 describe('game runtime configuration', () => {
+  it('waits for a real save identity before warming the companion session', () => {
+    expect(shouldWarmCompanionSession(undefined, undefined)).toBe(false)
+    expect(shouldWarmCompanionSession(undefined, 'world-a')).toBe(true)
+    expect(shouldWarmCompanionSession('world-a', 'world-a')).toBe(false)
+    expect(shouldWarmCompanionSession('world-a', 'world-b')).toBe(true)
+  })
+
   it('keeps ONI on its in-game Q key instead of the shared desktop push-to-talk key', () => {
-    expect(globalPushToTalkProcessIds([
+    const adapters = [
       { adapterId: 'oni', gameId: 'oxygen-not-included', version: '1', protocolVersion: '1.1', processId: 10 },
       { adapterId: 'dst', gameId: 'dont-starve-together', version: '1', protocolVersion: '1.1', processId: 20 },
       { adapterId: 'stardew', gameId: 'stardew-valley', version: '1', protocolVersion: '1.1', processId: 30 },
-    ])).toEqual([20, 30])
+    ] as const
+    expect(globalPushToTalkProcessIds(adapters)).toEqual([20, 30])
+    expect(mediaHostProcessIds(adapters)).toEqual([10, 20, 30])
   })
 
   it('matches only explicit post-reply game-action commands', () => {
@@ -31,8 +40,10 @@ describe('game runtime configuration', () => {
     const config = resolveConfig()
     expect(config.vision.enabled).toBe(true)
     expect(config.vision.maxWidth).toBe(1280)
-    expect(config.vision.provider).toBe('zhipu')
-    expect(config.vision.model).toBe('glm-5v-turbo')
+    expect(config.vision.provider).toBe('minimax')
+    expect(config.vision.model).toBe('MiniMax-M3')
+    expect(config.vision.reasoningEffort).toBe('off')
+    expect(config.vision.strictModel).toBe(true)
     expect(config.speech.enabled).toBe(true)
     expect(config.speech.provider).toBe('auto')
     expect(config.speech.recognitionProvider).toBe('auto')

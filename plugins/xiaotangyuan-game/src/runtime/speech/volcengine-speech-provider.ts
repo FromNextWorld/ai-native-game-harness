@@ -346,8 +346,30 @@ export class VolcengineSpeechProvider implements SpeechCapabilityProvider, Speec
   }
 
   async *synthesizeStream(request: SpeechSynthesisRequest, signal: AbortSignal): AsyncIterable<Uint8Array> {
-    const apiKey = await this.apiKey()
     const requestId = randomUUID()
+    const voice = request.voice ?? this.config.ttsVoice
+    if (!voice.trim() || !this.config.ttsResourceId.trim()) throw new Error('语音音色或资源配置为空，请检查统一语音配置')
+    const identity = JSON.stringify({
+      requestId, provider: this.id, resource: this.config.ttsResourceId, voice,
+      ...request.trace,
+    })
+    const startedAt = performance.now()
+    let audioBytes = 0
+    let complete = false
+    this.ctx.logger.info(`xiaotangyuan tts synthesis.start ${identity}`)
+    try {
+      for await (const chunk of this.streamAudio(request, voice, requestId, signal)) {
+        audioBytes += chunk.byteLength
+        yield chunk
+      }
+      complete = true
+    } finally {
+      this.ctx.logger.info(`xiaotangyuan tts synthesis.${complete ? 'complete' : signal.aborted ? 'cancelled' : 'failed'} ${identity} audioBytes=${audioBytes} elapsedMs=${Math.round(performance.now() - startedAt)}`)
+    }
+  }
+
+  private async *streamAudio(request: SpeechSynthesisRequest, voice: string, requestId: string, signal: AbortSignal): AsyncIterable<Uint8Array> {
+    const apiKey = await this.apiKey()
     const response = await fetch(TTS_URL, {
       method: 'POST',
       headers: this.headers(apiKey, this.config.ttsResourceId, requestId),
@@ -355,7 +377,7 @@ export class VolcengineSpeechProvider implements SpeechCapabilityProvider, Speec
         user: { uid: 'xiaotangyuan-game-ai' },
         req_params: {
           text: request.text,
-          speaker: request.voice ?? this.config.ttsVoice,
+          speaker: voice,
           audio_params: { format: 'pcm', sample_rate: 24000 },
         },
       }),

@@ -2,6 +2,8 @@ import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 
 export interface VisionConfig {
+  reasoningEffort?: string
+  strictModel?: boolean
   enabled?: boolean
   maxWidth?: number
   provider?: string
@@ -9,6 +11,9 @@ export interface VisionConfig {
 }
 
 export interface SpeechConfig {
+  /** Trusted local plugin module; never populated from a player message. */
+  extensionModule?: string
+  extensionOptions?: Record<string, unknown>
   enabled?: boolean
   /** Compatibility shortcut that selects the same implementation for ASR and TTS. */
   provider?: string
@@ -84,6 +89,8 @@ export interface ResolvedConfig {
   port: number
   adapterProtocolUrl: string
   vision: {
+    reasoningEffort: string
+    strictModel: boolean
     enabled: boolean
     maxWidth: number
     provider: string
@@ -225,9 +232,10 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   if (manifest.protocol !== 'https:' && !(manifest.protocol === 'http:' && isLoopback(manifest.hostname))) {
     throw new Error('installers.dontStarve.manifestUrl must use HTTPS except for loopback development')
   }
-  const archivePath = config.installers?.dontStarve?.archivePath?.trim()
-  const archiveVersion = config.installers?.dontStarve?.archiveVersion?.trim()
-  const archiveSha256 = config.installers?.dontStarve?.archiveSha256?.trim().toLowerCase()
+  const explicitArchive = [config.installers?.dontStarve?.archivePath, config.installers?.dontStarve?.archiveVersion, config.installers?.dontStarve?.archiveSha256].some(value => value !== undefined)
+  const archivePath = (explicitArchive ? config.installers?.dontStarve?.archivePath : process.env.AGH_DST_ARCHIVE_PATH)?.trim()
+  const archiveVersion = (explicitArchive ? config.installers?.dontStarve?.archiveVersion : process.env.AGH_DST_ARCHIVE_VERSION)?.trim()
+  const archiveSha256 = (explicitArchive ? config.installers?.dontStarve?.archiveSha256 : process.env.AGH_DST_ARCHIVE_SHA256)?.trim().toLowerCase()
   const localArchiveValues = [archivePath, archiveVersion, archiveSha256].filter(value => value !== undefined)
   if (localArchiveValues.length !== 0 && localArchiveValues.length !== 3) {
     throw new Error('local Don\'t Starve installer requires archivePath, archiveVersion, and archiveSha256 together')
@@ -247,10 +255,12 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     port,
     adapterProtocolUrl,
     vision: {
+      reasoningEffort: config.vision?.reasoningEffort ?? 'off',
+      strictModel: config.vision?.strictModel ?? true,
       enabled: config.vision?.enabled ?? true,
       maxWidth: visionMaxWidth,
-      provider: config.vision?.provider?.trim() || 'zhipu',
-      model: config.vision?.model?.trim() || 'glm-5v-turbo',
+      provider: config.vision?.provider?.trim() || 'minimax',
+      model: config.vision?.model?.trim() || 'MiniMax-M3',
     },
     speech: {
       enabled: config.speech?.enabled ?? true,

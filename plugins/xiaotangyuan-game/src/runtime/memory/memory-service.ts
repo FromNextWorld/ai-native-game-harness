@@ -14,6 +14,7 @@ import {
   type SharedProfilePatch,
 } from './contracts.js'
 import { MemoryStore } from './memory-store.js'
+import { reportRuntimeError } from '../error-diagnostics.js'
 
 const EXTRACTION_SYSTEM_PROMPT = `You extract durable memory for a local game companion.
 Return exactly one JSON object and no markdown.
@@ -113,7 +114,8 @@ function extractionInput(adapter: AdapterHello, request: GameChatRequest, reply:
 }
 
 export class MemoryService {
-  readonly store: MemoryStore
+  private persistentStore?: MemoryStore
+  private failureId?: string
   private learningQueue: Promise<void> = Promise.resolve()
   private readonly playSessions = new Map<string, ActivePlaySession>()
   private closing = false
@@ -122,12 +124,42 @@ export class MemoryService {
     private readonly ctx: Context,
     private readonly config: ResolvedConfig['memory'],
   ) {
-    this.store = new MemoryStore(config)
+    try { this.persistentStore = new MemoryStore(config) }
+    catch (error) { this.disable(error, 'memory.startup') }
+  }
+
+  get available(): boolean { return this.persistentStore !== undefined && this.failureId === undefined }
+
+  get status(): { available: boolean; errorId?: string; message?: string } {
+    return this.available ? { available: true } : {
+      available: false, errorId: this.failureId,
+      message: '本地长期记忆暂不可用，原数据未清空；聊天和游戏技能可以继续。',
+    }
+  }
+
+  /** Explicit memory tools must report failure, never claim a non-persistent save succeeded. */
+  get store(): MemoryStore {
+    if (!this.available) throw Object.assign(new Error(`${this.status.message} 错误编号：${this.failureId ?? 'unavailable'}`), { code: 'MEMORY_UNAVAILABLE' })
+    return this.persistentStore!
+  }
+
+  optionalRead<T>(read: (store: MemoryStore) => T): T | undefined {
+    if (!this.available) return undefined
+    try { return read(this.store) }
+    catch (error) { this.disable(error, 'memory.operation'); return undefined }
+  }
+
+  private disable(error: unknown, stage: string): void {
+    if (this.failureId !== undefined) return
+    this.failureId = reportRuntimeError(error, { stage, source: 'memory-service', recovered: false }).errorId
+    // Circuit breaker: one durable error, no repeated reads/writes or model extraction.
+    try { this.ctx.logger.warn(`xiaotangyuan-game: 本地记忆已暂停，原数据保留；聊天和游戏技能继续。错误编号：${this.failureId}`) } catch { /* Independent diagnostic already attempted. */ }
   }
 
   adapterConnected(sessionKey: string, adapter: AdapterHello): void {
-    if (!this.config.enabled) return
-    this.store.recordPlayedGame(adapter.gameId)
+    if (!this.config.enabled || !this.available || this.closing) return
+    this.optionalRead(store => store.recordPlayedGame(adapter.gameId))
+    if (!this.available) return
     const active: ActivePlaySession = {
       storageId: randomUUID(),
       adapter,
@@ -136,11 +168,11 @@ export class MemoryService {
       transcript: [],
     }
     this.playSessions.set(sessionKey, active)
-    if (active.identity !== undefined) this.store.beginPlaySession(active.storageId, active.identity, active.lastPersistedAt)
+    if (active.identity !== undefined) this.optionalRead(store => store.beginPlaySession(active.storageId, active.identity!, active.lastPersistedAt))
   }
 
   observeSession(sessionKey: string, adapter: AdapterHello | undefined, request?: GameChatRequest): void {
-    if (!this.config.enabled || adapter === undefined || this.closing) return
+    if (!this.config.enabled || !this.available || adapter === undefined || this.closing) return
     let active = this.playSessions.get(sessionKey)
     if (active === undefined) {
       this.adapterConnected(sessionKey, adapter)
@@ -154,18 +186,20 @@ export class MemoryService {
         storageId: randomUUID(), adapter, identity, lastPersistedAt: Date.now(), transcript: [],
       }
       this.playSessions.set(sessionKey, active)
-      this.store.beginPlaySession(active.storageId, identity, active.lastPersistedAt)
+      const current = active
+      this.optionalRead(store => store.beginPlaySession(current.storageId, identity, current.lastPersistedAt))
       return
     }
     if (active.identity === undefined || Date.now() - active.lastPersistedAt < 15_000) return
     active.lastPersistedAt = Date.now()
-    this.store.touchPlaySession(active.storageId, active.identity, active.lastPersistedAt)
+    const current = active
+    this.optionalRead(store => store.touchPlaySession(current.storageId, current.identity!, current.lastPersistedAt))
   }
 
   recall(adapter: AdapterHello | undefined, request: GameChatRequest): string | undefined {
-    if (!this.config.enabled) return undefined
+    if (!this.config.enabled || !this.available) return undefined
     const identity = resolveMemoryIdentity(adapter, request)
-    return identity === undefined ? undefined : this.store.recall(identity, request.text)
+    return identity === undefined ? undefined : this.optionalRead(store => store.recall(identity, request.text))
   }
 
   activeIdentities(): MemoryIdentity[] {
@@ -184,7 +218,7 @@ export class MemoryService {
     interactionId: string,
     selection: ModelSelection,
   ): void {
-    if (!this.config.enabled || !this.config.autoLearn || this.closing || adapter === undefined) return
+    if (!this.config.enabled || !this.available || !this.config.autoLearn || this.closing || adapter === undefined) return
     this.observeSession(sessionKey, adapter, request)
     const identity = resolveMemoryIdentity(adapter, request)
     if (identity === undefined) return
@@ -196,9 +230,12 @@ export class MemoryService {
     }
     this.learningQueue = this.learningQueue
       .then(async () => {
+        if (!this.available) return
         const extraction = await this.extract(adapter, request, reply, selection)
-        if (extraction.shared !== undefined) this.store.updateSharedProfile(extraction.shared)
-        this.store.remember(identity, extraction.gameMemories, interactionId)
+        this.optionalRead(store => {
+          if (extraction.shared !== undefined) store.updateSharedProfile(extraction.shared)
+          store.remember(identity, extraction.gameMemories, interactionId)
+        })
       })
       .catch(error => {
         this.ctx.logger.warn('xiaotangyuan-game: 后台记忆提取失败，本轮回复不受影响')
@@ -214,13 +251,14 @@ export class MemoryService {
   }
 
   private finishActiveSession(active: ActivePlaySession, now: number): void {
-    if (active.identity !== undefined) this.store.endPlaySession(active.storageId, active.identity, now)
-    if (!this.config.autoLearn || active.identity === undefined || active.selection === undefined || active.transcript.length < 2) return
+    if (active.identity !== undefined) this.optionalRead(store => store.endPlaySession(active.storageId, active.identity!, now))
+    if (!this.available || !this.config.autoLearn || active.identity === undefined || active.selection === undefined || active.transcript.length < 2) return
     const snapshot = { ...active, transcript: [...active.transcript] }
     this.learningQueue = this.learningQueue
       .then(async () => {
+        if (!this.available) return
         const extraction = await this.extractSessionSummary(snapshot)
-        this.store.remember(snapshot.identity!, extraction.gameMemories, `session:${snapshot.storageId}`)
+        this.optionalRead(store => store.remember(snapshot.identity!, extraction.gameMemories, `session:${snapshot.storageId}`))
       })
       .catch(error => {
         this.ctx.logger.warn('xiaotangyuan-game: 游玩阶段总结失败，已有记忆和统计不受影响')
@@ -273,7 +311,8 @@ export class MemoryService {
     this.closing = true
     for (const sessionKey of [...this.playSessions.keys()]) this.endSession(sessionKey)
     await this.learningQueue
-    this.store.close()
+    try { this.persistentStore?.close() }
+    catch (error) { reportRuntimeError(error, { stage: 'memory.close', source: 'memory-service', recovered: false }) }
   }
 
   async flush(): Promise<void> {

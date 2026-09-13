@@ -1,0 +1,31 @@
+# Sword voice repair — 2026-09-12
+
+- Current task only; user explicitly authorized fixing ASR, errors and summon decisions with “处理把”. Preserve all existing edits; no cross-task dispatch, no commits/push, no model/provider/key/save/account changes.
+- Source targets: established core/private source-unified trees. Work proceeds incrementally; installation requires independent preflight and exact candidate/source/recovery-file checks. No full reinstall or killing active games.
+- ASR contract: preserve full ordered audio and final segments; never turn missing/ambiguous recognition into a guessed summon/stop. Retain bounded safe provider error metadata, do not expose secrets/signed URLs/raw audio; retry only once for classified transport failures, not credential/quota/protocol failures. A successful final transcript must be forwarded intact.
+- Decision contract: ordinary companion reply completes before game execution; speech playback completion and model-text completion remain distinct. Explicit emergency stop stays immediate. Work classification remains independent and must not be silently moved behind TTS. Existing capabilities must not be mistaken for learning; state/success/cooldown claims need current receipts. No keyword patch converting “归中” to summon.
+- Scope: private provider transport, speech extension and bridge error handling with focused tests; core speech controller/error presentation and game decision boundary with real registration/Agent/Gateway tests, and this task's reports. Shared package/lock files, provider configuration, other games' Mods, UI redesign and deployed cloud are excluded.
+- First freeze target baseline, then run the same behavioral regressions against old and candidate code. External speech/model/game may be simulated, never the production glue under test. Historical HTTP 500 and truncated transcript have no saved upstream packet/audio, so any synthetic reproduced defect must be distinguished from the unproven historical cause.
+- Required checks: per-turn ordered ASR delivery and error propagation; setup/resume tool catalog and execution gate; ordinary chat, existing summon/stop, learning, Work, cancel/stale callbacks; preserve visual Mod and native gameplay rates. Do not call all acceptance passed if a part remains untested. No automatic CI gate is claimed unless actually wired.
+- Permissions: current writable task root excludes source worktrees; use normal approval path for integration/build outside root, or keep isolated candidate/patches under the current task if unavailable. No bypass of filesystem restrictions.
+
+## Delivery / handoff — 2026-09-12 16:16 Beijing
+
+- Scope implementation and focused red-before-green checks completed. User replied “已退出，可以更新”; read-only process preflight confirmed no remaining app/game process before replacement.
+- Incremental install completed (44 exact files, no full reinstall, no Git submission). Fresh normal startup verified 44/44 hashes, matching Profile/recovery archive, Web HTTP 200, and installed Runtime-owned 33145 listener. Visual Mod unchanged. No keys/model/cloud/save mutations.
+- Full core suite is 335/336, with unrelated existing DST temporary-directory rename EPERM also failing isolated rerun (8/9); not reported as full pass.
+- Real microphone/model/game summon acceptance remains pending. Current loaded profile covered; old dormant self-hosted profile and old full installers are not upgraded. No global reply-first, arbitrary projectile-learning acceptance or automated release gate is claimed.
+- Detailed evidence, commands and limitations: `docs/testing/SWORD_VOICE_REPAIR_20260912.md`; frozen install evidence: `C:/game/deepseekharness/output/sword-voice-repair-20260912/stage-HTEiFv/`.
+- Deployment window released. No cross-task messages or delegation occurred.
+
+## Reopened — 2026-09-12 16:40 Beijing: real barge-in crash
+
+- User's immediate gameplay screenshot fails acceptance: Runtime exited with code 1 on an unhandled rejection whose abort reason is “玩家打断了语音回复”; Desktop subsequently recovered. Do not present startup evidence as stable voice acceptance.
+- Bounded repair: SpeechController background synthesis/caption promise ownership, cancellation and completion identity; regression fixtures and this claim/report. No shared Desktop entry/package/lock, no new provider/model/key, no game/Mod/save changes.
+- Invariants: normal V barge-in cancels old speech without killing Runtime; old failure/cleanup cannot remove a newer reply; partial failed or canceled audio is not playback completion and cannot unlock game actions; pre-audio failure still permits existing full-answer fallback. Keep actual MediaHost event registration, timers and cancellation code in the crash regression; simulate only external provider/device.
+- Freeze currently installed/source controller first. Prove isolated Node with strict unhandled-rejection policy exits on old behavior before fixing; also test successful next recording and actual Gateway/Agent action suppression after stream failure. Capture process exit, not only a mocked cancellation result. No global catch/swallow of unhandled rejections.
+- Game currently running: do not terminate or overwrite Mod. Source/tests can proceed; installing a new plugin requires a fresh safe app-exit window. Prior exited approval was consumed by the previous completed update.
+
+- 16:53: bounded Controller fix complete; strict Node crash regressions old 5/5 fail, candidate 5/5 pass; broader 114/114 pass and independent TypeScript build pass. Candidate manifest prepared for 9 targets; no new installation performed yet. Async user exit request pending. Evidence: `docs/testing/SPEECH_BARGE_IN_CRASH_20260912.md`; artifacts `barge-in-followup/` under this task output. No child agent, cloud/provider/config/Mod or shared Desktop changes.
+
+- 16:56: user explicitly confirmed exit again; 9 targets installed and verified after normal startup. Actual installed modules also survived all 5 strict Node scenarios. Runtime 39040 / parent 44328, Web 200, 33145 owned and ready, recovery hash 09b07cc0bccc58eeb487d0fa15b02a918e1713ac2d10786503146edfb9f9d5b5. Game not running at final check; no real new microphone/game acceptance. Kept the normal app running for the user, no test processes left. Deployment window released; no Git submission.

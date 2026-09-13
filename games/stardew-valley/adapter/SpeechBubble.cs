@@ -26,6 +26,12 @@ internal sealed class SpeechBubble
     public void Show(string nextText)
     {
         this.text = nextText;
+        if (this.speechActive)
+        {
+            this.persistent = true;
+            this.statusVisible = false;
+            return;
+        }
         this.startedAt = (Game1.currentGameTime?.TotalGameTime.Ticks ?? 0) / 10000;
         this.durationMilliseconds = DefaultDurationMilliseconds;
         this.persistent = this.speechActive;

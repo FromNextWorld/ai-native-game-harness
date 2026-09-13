@@ -42,7 +42,13 @@ export class SkillStore {
             learningAttempts: Array.isArray(parsed.learningAttempts) ? parsed.learningAttempts : [],
           }
         }
-      } catch {}
+        throw new Error('技能库格式或版本不受支持')
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        // Never replace damaged or temporarily unreadable user skills with an
+        // empty document. Leave the original intact for recovery.
+        throw new Error(`技能库无法读取，原文件已保留：${path}`, { cause: error })
+      }
     }
     return { schemaVersion: 2, skills: [], history: [], learningAttempts: [] }
   }
@@ -76,6 +82,13 @@ export class SkillStore {
 
   find(gameId: string, skillId: string): SkillRecord | undefined {
     return this.document.skills.find(skill => skill.gameId === gameId && skill.id === skillId)
+  }
+
+  /** Fixed versions may live in history; missing/pruned versions fail explicitly. */
+  verifiedVersion(gameId: string, skillId: string, version: number): SkillRecord | undefined {
+    const record = [...this.document.skills, ...this.document.history].find(skill =>
+      skill.gameId === gameId && skill.id === skillId && skill.version === version && skill.verified === true)
+    return record === undefined ? undefined : structuredClone(record)
   }
 
   list(gameId: string): SkillRecord[] {

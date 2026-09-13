@@ -9,6 +9,7 @@ const MAX_SOURCE_LENGTH = 12_000
 const MAX_AST_NODES = 200
 const MAX_NESTING = 8
 const MAX_CALL_SITES = 30
+const UNSAFE_FIELDS = new Set(['__proto__', 'prototype', 'constructor'])
 
 function sourceError(message: string, token: Token): Error {
   return new Error(`技能源码第 ${token.line} 行第 ${token.column} 列：${message}`)
@@ -81,6 +82,12 @@ function tokenize(source: string): Token[] {
         while (index < source.length && /\d/.test(source[index] ?? '')) value += advance()
       }
       push('number', value, tokenLine, tokenColumn); continue
+    }
+    // Match longest operators first. The existing ==/!= AST already has strict
+    // runtime semantics; normalize tokens, never source strings or comments.
+    const triple = source.slice(index, index + 3)
+    if (triple === '===' || triple === '!==') {
+      advance(); advance(); advance(); push('symbol', triple.slice(0, 2), tokenLine, tokenColumn); continue
     }
     const pair = source.slice(index, index + 2)
     if (['==', '!=', '>=', '<=', '&&', '||'].includes(pair)) {
@@ -172,6 +179,10 @@ class Parser {
       return this.node({ kind: 'fail', message: message.slice(0, 300) })
     }
     if (this.keyword('break')) { this.optionalSemicolon(); return this.node({ kind: 'break' }) }
+    if (this.keyword('return')) {
+      const value = this.expression(); this.optionalSemicolon()
+      return this.node({ kind: 'return', value })
+    }
     throw sourceError('不支持的语句；只允许 let/await/if/repeat/try/assert/fail/break', this.current())
   }
   private block(depth: number): SkillSourceStatement[] {
@@ -184,12 +195,19 @@ class Parser {
     this.take('symbol', '}')
     return statements
   }
-  private call(): Extract<SkillSourceStatement, { kind: 'call' }> {
+  private call(): Extract<SkillSourceStatement, { kind: 'call' | 'skill' }> {
     this.take('identifier', 'await', '原子调用必须以 await 开头')
-    this.take('identifier', 'atom', '只允许调用 atom')
+    const callee = this.take('identifier').value
+    if (callee !== 'atom' && callee !== 'skill') throw sourceError('只允许调用 atom 或 skill', this.current())
     this.take('symbol', '(', 'atom 后需要括号')
     const atom = this.take('string', undefined, 'atom 的第一个参数必须是原子名称').value
     if (!ATOM.test(atom)) throw sourceError('原子能力名称无效', this.current())
+    let version = 0
+    if (callee === 'skill') {
+      this.take('symbol', ',', 'skill 必须固定版本')
+      version = Number(this.take('number', undefined, '技能版本必须是正整数').value)
+      if (!Number.isSafeInteger(version) || version < 1) throw sourceError('技能版本必须是正整数', this.current())
+    }
     let args: Record<string, SkillExpression> = {}
     if (this.at('symbol', ',')) {
       this.position += 1
@@ -198,7 +216,7 @@ class Parser {
       args = expression.entries
     }
     this.take('symbol', ')', 'atom 调用缺少右括号')
-    return { kind: 'call', atom, args }
+    return callee === 'atom' ? { kind: 'call', atom, args } : { kind: 'skill', skillId: atom, version, args }
   }
   private expression(): SkillExpression { return this.or() }
   private or(): SkillExpression {
@@ -247,6 +265,7 @@ class Parser {
     if (this.at('identifier')) {
       const path = [this.take('identifier').value]
       while (this.at('symbol', '.')) { this.position += 1; path.push(this.take('identifier', undefined, '属性访问需要字段名').value) }
+      if (path.some(part => UNSAFE_FIELDS.has(part))) throw sourceError('禁止访问原型字段', token)
       return this.node({ kind: 'reference', path })
     }
     if (this.at('symbol', '(')) {
@@ -267,6 +286,7 @@ class Parser {
       const entries: Record<string, SkillExpression> = {}
       while (!this.at('symbol', '}')) {
         const key = this.at('identifier') ? this.take('identifier').value : this.take('string', undefined, '对象字段名无效').value
+        if (UNSAFE_FIELDS.has(key)) throw sourceError('禁止原型字段', this.current())
         if (Object.hasOwn(entries, key)) throw sourceError(`对象字段重复：${key}`, this.current())
         this.take('symbol', ':', '对象字段缺少冒号')
         entries[key] = this.expression()
@@ -312,7 +332,7 @@ function validateExpression(expression: SkillExpression, variables: ReadonlySet<
 
 function hasFallbackOutcome(statements: SkillSourceStatement[]): boolean {
   return statements.some(statement => {
-    if (statement.kind === 'call' || statement.kind === 'fail' || statement.kind === 'assert') return true
+    if (statement.kind === 'call' || statement.kind === 'skill' || statement.kind === 'fail' || statement.kind === 'assert') return true
     if (statement.kind === 'if') return hasFallbackOutcome(statement.then) || hasFallbackOutcome(statement.else ?? [])
     if (statement.kind === 'repeat') return hasFallbackOutcome(statement.body)
     if (statement.kind === 'try') return hasFallbackOutcome(statement.body) || hasFallbackOutcome(statement.fallback)
@@ -329,13 +349,15 @@ export function validateSkillSourceProgram(program: SkillProgramV2, allowedAtoms
     const variables = new Set(inherited)
     const localVariables = new Set<string>()
     for (const statement of statements) {
-      if (statement.kind === 'call') {
+      if (statement.kind === 'call' || statement.kind === 'skill') {
         callSites += 1
-        if (!ATOM.test(statement.atom)) throw new Error('技能包含无效原子能力')
-        if (allowedAtoms !== undefined && !allowedAtoms.has(statement.atom)) throw new Error(`游戏未声明原子能力：${statement.atom}`)
+        if (statement.kind === 'call') {
+          if (!ATOM.test(statement.atom)) throw new Error('技能包含无效原子能力')
+          if (allowedAtoms !== undefined && !allowedAtoms.has(statement.atom)) throw new Error(`游戏未声明原子能力：${statement.atom}`)
+        }
         Object.values(statement.args).forEach(expression => validateExpression(expression, variables))
         if (statement.saveAs !== undefined) {
-          if (!IDENTIFIER.test(statement.saveAs) || localVariables.has(statement.saveAs)) throw new Error(`技能变量名无效或重复：${statement.saveAs}`)
+          if (!IDENTIFIER.test(statement.saveAs) || statement.saveAs === 'params' || localVariables.has(statement.saveAs)) throw new Error(`技能变量名无效或重复：${statement.saveAs}`)
           localVariables.add(statement.saveAs); variables.add(statement.saveAs)
         }
       } else if (statement.kind === 'if') {
@@ -349,11 +371,12 @@ export function validateSkillSourceProgram(program: SkillProgramV2, allowedAtoms
         if (!hasFallbackOutcome(statement.fallback)) throw new Error('catch 不能只吞掉错误，必须执行回退原子、断言或 fail')
         validateBlock(statement.body, variables, loopDepth, nesting + 1)
         validateBlock(statement.fallback, variables, loopDepth, nesting + 1)
-      } else if (statement.kind === 'assert') validateExpression(statement.condition, variables)
+      } else if (statement.kind === 'return') validateExpression(statement.value, variables)
+      else if (statement.kind === 'assert') validateExpression(statement.condition, variables)
       else if (statement.kind === 'break' && loopDepth === 0) throw new Error('break 只能出现在 repeat 中')
     }
   }
-  validateBlock(program.body, new Set(), 0, 0)
+  validateBlock(program.body, new Set(['params']), 0, 0)
   if (callSites < 1) throw new Error('技能源码至少要调用一个游戏原子能力')
   if (callSites > MAX_CALL_SITES) throw new Error(`技能源码最多包含 ${MAX_CALL_SITES} 个原子调用位置`)
 }

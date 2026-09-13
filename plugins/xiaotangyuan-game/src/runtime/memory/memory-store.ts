@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { checkExistingMemory, tryBackupMemory } from './memory-health.js'
 import type { ResolvedConfig } from '../../config.js'
 import type {
   GameMemoryCandidate,
@@ -120,14 +121,16 @@ function rowToEvent(row: EventRow): RememberedGameEvent {
 export class MemoryStore {
   readonly databasePath: string
   private readonly db: DatabaseSync
+  private closed = false
 
   constructor(private readonly config: ResolvedConfig['memory']) {
     mkdirSync(config.directory, { recursive: true })
     this.databasePath = join(config.directory, 'memory-v1.sqlite')
+    checkExistingMemory(this.databasePath)
     this.db = new DatabaseSync(this.databasePath)
-    this.db.exec(`
+    try { this.db.exec(`
       PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = NORMAL;
+      PRAGMA synchronous = FULL;
       PRAGMA busy_timeout = 3000;
       CREATE TABLE IF NOT EXISTS shared_profile (
         profile_id TEXT PRIMARY KEY,
@@ -171,7 +174,11 @@ export class MemoryStore {
         local_day TEXT NOT NULL,
         PRIMARY KEY(profile_id, game_id, save_id, local_day)
       );
-    `)
+    `) } catch (error) {
+      this.db.close()
+      throw error
+    }
+    tryBackupMemory(this.db, this.databasePath)
   }
 
   getSharedProfile(): SharedProfile {
@@ -433,6 +440,9 @@ export class MemoryStore {
   }
 
   close(): void {
-    this.db.close()
+    if (this.closed) return
+    this.closed = true
+    try { tryBackupMemory(this.db, this.databasePath) }
+    finally { this.db.close() }
   }
 }

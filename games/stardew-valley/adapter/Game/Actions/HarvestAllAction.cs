@@ -25,7 +25,9 @@ namespace StardewAgentMod.Game.Actions
 
         public string Intent => "harvest_all";
 
-        public ActionResult Execute(GameLocation location)
+        public ActionResult Execute(GameLocation location) => Execute(location, null);
+
+        public ActionResult Execute(GameLocation location, FieldScope? scope)
         {
             var plan = this.CreatePlan(location);
             var harvestedNames = new Dictionary<string, int>();
@@ -35,6 +37,7 @@ namespace StardewAgentMod.Game.Actions
 
             foreach (var target in plan.Targets)
             {
+                if (scope != null && !scope.Contains((int)target.Tile.X, (int)target.Tile.Y)) continue;
                 try
                 {
                     if (TryHarvest(target, this.monitor))

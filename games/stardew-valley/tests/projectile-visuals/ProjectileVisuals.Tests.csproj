@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
+    <CombatSource Condition="'$(CombatSource)' == ''">../../adapter/Game/Combat</CombatSource>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(CombatSource)/ProjectileGeometry.cs" Link="Production/ProjectileGeometry.cs" />
+    <Compile Include="$(CombatSource)/ProjectileRenderer.cs" Link="Production/ProjectileRenderer.cs" />
+    <Compile Include="$(CombatSource)/ProjectileGroup.cs" Link="Production/ProjectileGroup.cs" />
+    <Compile Include="$(CombatSource)/SwordResourceTargets.cs" Link="Production/SwordResourceTargets.cs" />
+    <Compile Include="../../adapter/GameObservationBuilder.cs" Link="Production/GameObservationBuilder.cs" />
+  </ItemGroup>
+</Project>

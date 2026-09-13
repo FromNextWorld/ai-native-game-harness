@@ -1,8 +1,13 @@
+# Legacy recovery only. Formal player/Desktop packaging uses build-player-package.ps1 (TS + Node).
 param(
-    [string]$OutputDirectory = 'dist'
+    [string]$OutputDirectory = 'dist',
+    [switch]$LegacyPython
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $LegacyPython) {
+    throw '旧 Python 启动器已停用。正式包请运行 build-player-package.ps1；仅恢复旧版时显式传入 -LegacyPython。'
+}
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
 $outputPath = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {

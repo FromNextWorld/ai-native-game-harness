@@ -24,7 +24,7 @@ describe('voice and post-turn work timing', () => {
     expect(events).toEqual(['bubble-held', 'audio-started', 'audio-finished', 'bubble-released'])
   })
 
-  it('starts deferred work recognition while the final speech queue is still draining', async () => {
+  it('starts deferred work recognition without publishing the complete caption before speech drains', async () => {
     const events: string[] = []
     let releaseSpeech!: () => void
     const speechQueue = new Promise<void>(resolve => { releaseSpeech = resolve })
@@ -78,30 +78,63 @@ describe('voice and post-turn work timing', () => {
     expect(recognitionStarted).toBe(true)
     expect(responseSettled).toBe(false)
     expect(finishSpeechReply).not.toHaveBeenCalled()
-    expect(notify).toHaveBeenCalledWith(connection, 'assistant.present', {
-      text: '正常回答已经完成。',
-      source: 'voice',
-    })
-    expect(finishTextStream).toHaveBeenCalledWith(connection, 'turn-1', '正常回答已经完成。', 'voice')
+    expect(notify).not.toHaveBeenCalledWith(connection, 'assistant.present', expect.anything())
+    expect(finishTextStream).not.toHaveBeenCalled()
     expect(events).toEqual([
       'answer-complete',
       'work-recognition-started',
-      'caption-presented',
-      'caption-finished',
-      'game-action-scheduled',
     ])
 
     releaseSpeech()
     await response
     expect(finishSpeechReply).toHaveBeenCalledOnce()
+    expect(finishTextStream).toHaveBeenCalledWith(connection, 'turn-1', '正常回答已经完成。', 'voice')
     expect(events).toEqual([
       'answer-complete',
       'work-recognition-started',
-      'caption-presented',
+      'speech-finished',
       'caption-finished',
       'game-action-scheduled',
-      'speech-finished',
     ])
+  })
+
+  it('publishes a cleaned complete caption only when streaming speech did not play', async () => {
+    const connection = {
+      latestSaveId: 'save-a',
+      latestObservation: undefined,
+      speechQueue: Promise.resolve(),
+      adapter: { gameId: 'test-game' },
+      session: {
+        async ask() {
+          return { reply: '**听到了。**', sessionId: 'companion-session', interactionId: 'turn-fallback' }
+        },
+      },
+    }
+    const notify = vi.fn()
+    const finishTextStream = vi.fn()
+    const gateway = {
+      connectionForProcess: () => connection,
+      markInteraction: () => undefined,
+      schedulePostReplyAction: vi.fn(),
+      finishSpeechReply: vi.fn(async () => false),
+      notify,
+      finishTextStream,
+      speechFinished: vi.fn(),
+    }
+    const respond = GameGateway.prototype.respond as unknown as (
+      this: typeof gateway,
+      processId: number,
+      transcript: string,
+      signal: AbortSignal,
+    ) => Promise<unknown>
+
+    await respond.call(gateway, 42, '能听到吗', new AbortController().signal)
+
+    expect(notify).toHaveBeenCalledWith(connection, 'assistant.present', {
+      text: '听到了。',
+      source: 'voice',
+    })
+    expect(finishTextStream).toHaveBeenCalledWith(connection, 'turn-fallback', '听到了。', 'voice')
   })
 
   it('publishes the reply before a game action while post-turn work still runs independently', async () => {
@@ -143,6 +176,7 @@ describe('voice and post-turn work timing', () => {
         return { success: true, reply: '吸水成功' }
       },
       schedulePostReplyAction: internals.schedulePostReplyAction,
+      selectPostReplyAction: async () => 'oni_companion_absorb_water',
       runPostReplyAction: internals.runPostReplyAction,
     }
     const respond = GameGateway.prototype.respond as unknown as (
@@ -155,7 +189,7 @@ describe('voice and post-turn work timing', () => {
     await respond.call(gateway, 42, '帮我吸水一下', new AbortController().signal)
     await new Promise<void>(resolve => setImmediate(resolve))
 
-    const replyIndex = events.indexOf('assistant.present')
+    const replyIndex = events.indexOf('assistant.text.done')
     const actionIndex = events.indexOf('game.atom.execute:oni_companion_absorb_water')
     expect(replyIndex).toBeGreaterThanOrEqual(0)
     expect(actionIndex).toBeGreaterThan(replyIndex)

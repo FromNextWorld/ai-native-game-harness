@@ -7,6 +7,7 @@ import os
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,10 @@ LOGGER = logging.getLogger("chester")
 ADAPTER_ID = "qimidandapigu.dont-starve-ai-mod"
 GAME_ID = "dont-starve-together"
 ADAPTER_VERSION = __version__
+STATE_POLL_INTERVAL_SECONDS = 1.0
+STATE_HEARTBEAT_SECONDS = 5.0
+REQUEST_EVENT_WINDOW_LIMIT = 100
+SEEN_REQUEST_ID_LIMIT = 256
 
 
 def _compact(value: object) -> object:
@@ -217,10 +222,15 @@ class ChesterApp:
         )
         self._busy = threading.Lock()
         self._skill_busy = threading.Lock()
+        self._cancelled_skill_ids: deque[str] = deque(maxlen=256)
+        self._skill_connection_epoch = 0
         self._seen_request_ids: set[str] = set()
+        self._seen_request_order: deque[str] = deque()
         self._last_bridge_heartbeat = 0.0
         self._last_bridge_status_write = 0.0
-        self._last_play_heartbeat = 0.0
+        self._last_play_state_check = 0.0
+        self._last_play_state_publish = 0.0
+        self._last_play_state_fingerprint: str | None = None
         self._last_request_at_unix: float | None = None
         self._last_request_action: str | None = None
         self._last_error: str | None = None
@@ -255,28 +265,63 @@ class ChesterApp:
             raise RuntimeError("原子能力名称无效")
         if not isinstance(arguments, dict):
             raise RuntimeError("原子能力参数无效")
-        return self._execute_game_atom(atom, arguments)
+        return self._execute_game_atom(atom, arguments, params.get("commandId"), params.get("expiresAtUnix"), params.get("_connectionGeneration"))
 
-    def _execute_game_atom(self, atom: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _execute_game_atom(self, atom: str, arguments: dict[str, Any],
+                           command_id: str | None = None, expires_at: float | None = None,
+                           connection_epoch: int | None = None) -> dict[str, Any]:
         command_path = self.settings.skill_command_file
         result_path = self.settings.skill_result_file
         if command_path is None or result_path is None:
             raise RuntimeError("饥荒技能 Bridge 文件不可用")
-        with self._skill_busy:
-            command_id = str(uuid.uuid4())
+        if not self._skill_busy.acquire(blocking=False):
+            raise RuntimeError("小汤圆还在执行上一个动作，请等待或取消")
+        command: dict[str, Any] | None = None
+        epoch = self._skill_connection_epoch if connection_epoch is None else connection_epoch
+        try:
+            if epoch != self._skill_connection_epoch or not self._gateway.connected:
+                raise RuntimeError("旧连接的游戏指令已取消")
+            command_id = command_id if isinstance(command_id, str) else str(uuid.uuid4())
+            now = time.time()
+            # Absolute wall-clock deadline also reaches Lua: pausing must not
+            # resurrect a command that the caller has already abandoned.
+            expires_at = min(float(expires_at), now + 30.0) if expires_at is not None else now + 30.0
+            if not now < expires_at <= now + 30.0:
+                raise RuntimeError("游戏指令已经过期")
+            if command_id in self._cancelled_skill_ids:
+                raise RuntimeError("游戏指令已取消")
             command = {
                 "schema_version": 1,
                 "id": command_id,
                 "atom": atom,
                 "arguments": arguments,
-                "created_at_unix": time.time(),
+                "created_at_unix": now,
+                "expires_at_unix": expires_at,
+                "lease_until_unix": min(expires_at, now + 3.0),
             }
-            command_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = command_path.with_suffix(command_path.suffix + ".tmp")
-            temporary.write_text(json.dumps(command, ensure_ascii=False), encoding="utf-8")
-            os.replace(temporary, command_path)
-            deadline = time.monotonic() + 12.0
-            while time.monotonic() < deadline:
+            def publish() -> None:
+                command_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = command_path.with_suffix(command_path.suffix + ".tmp")
+                temporary.write_text(json.dumps(command, ensure_ascii=False), encoding="utf-8")
+                for retry in range(10):
+                    try:
+                        os.replace(temporary, command_path)
+                        return
+                    except PermissionError:
+                        if retry == 9:
+                            raise
+                        time.sleep(0.01)
+
+            publish()
+            renewal = now + 0.5
+            deadline = time.monotonic() + (expires_at - now)
+            while time.monotonic() < deadline and time.time() < expires_at:
+                if command_id in self._cancelled_skill_ids or epoch != self._skill_connection_epoch or not self._gateway.connected:
+                    raise RuntimeError("游戏指令已取消或连接已断开")
+                if time.time() >= renewal:
+                    command["lease_until_unix"] = min(expires_at, time.time() + 3.0)
+                    publish()
+                    renewal = time.time() + 0.5
                 try:
                     result = json.loads(result_path.read_text(encoding="utf-8"))
                 except (FileNotFoundError, OSError, json.JSONDecodeError):
@@ -291,9 +336,32 @@ class ChesterApp:
                 if not isinstance(value, dict):
                     raise RuntimeError("Lua Mod 返回了无效原子能力结果")
                 return value
+            state_path = self.settings.state_file
+            try:
+                state_is_stale = state_path is not None and time.time() - state_path.stat().st_mtime > 5.0
+            except OSError:
+                state_is_stale = True
+            if state_is_stale:
+                raise RuntimeError(f"游戏似乎处于暂停状态，请切回饥荒窗口后再试：{atom}")
             raise RuntimeError(f"等待 Lua Mod 执行超时：{atom}")
+        finally:
+            try:
+                if command is not None:
+                    command["cancelled"] = True
+                    command["lease_until_unix"] = 0
+                    publish()
+            finally:
+                self._skill_busy.release()
 
     def _on_harness_notification(self, method: str, params: dict[str, Any]) -> None:
+        if method == "game.atom.cancel":
+            command_id = params.get("commandId")
+            if isinstance(command_id, str):
+                self._cancelled_skill_ids.append(command_id)
+            return
+        if method == "game.atom.disconnected":
+            self._skill_connection_epoch += 1
+            return
         if method == "assistant.status":
             status = params.get("status")
             self._recording = status == "recording"
@@ -338,14 +406,36 @@ class ChesterApp:
                 )
             self._write_bridge_status(force=True)
 
-    def _publish_state(self, state: dict[str, object] | None) -> None:
-        if state is not None:
-            context = build_chat_context(state)
-            payload: dict[str, object] = {"observation": context["observation"]}
-            save_id = context.get("saveId")
-            if isinstance(save_id, str):
-                payload["saveId"] = save_id
-            self._gateway.notify("state.update", payload)
+    @staticmethod
+    def _state_fingerprint(observation: dict[str, object]) -> str:
+        stable = dict(observation)
+        meta = stable.get("meta")
+        if isinstance(meta, dict):
+            stable["meta"] = {key: value for key, value in meta.items() if key != "capturedAt"}
+        encoded = json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def _publish_state(self, state: dict[str, object] | None, *, force: bool = True) -> bool:
+        if state is None:
+            return False
+        context = build_chat_context(state)
+        observation = context["observation"]
+        if not isinstance(observation, dict):
+            return False
+        now = time.monotonic()
+        fingerprint = self._state_fingerprint(observation)
+        heartbeat_due = now - self._last_play_state_publish >= STATE_HEARTBEAT_SECONDS
+        if not force and fingerprint == self._last_play_state_fingerprint and not heartbeat_due:
+            return False
+        payload: dict[str, object] = {"observation": observation}
+        save_id = context.get("saveId")
+        if isinstance(save_id, str):
+            payload["saveId"] = save_id
+        if not self._gateway.notify("state.update", payload):
+            return False
+        self._last_play_state_publish = now
+        self._last_play_state_fingerprint = fingerprint
+        return True
 
     def _retry_last(
         self,
@@ -420,12 +510,12 @@ class ChesterApp:
 
     def _publish_play_heartbeat(self) -> None:
         now = time.monotonic()
-        if now - self._last_play_heartbeat < 15.0:
+        if now - self._last_play_state_check < STATE_POLL_INTERVAL_SECONDS:
             return
-        self._last_play_heartbeat = now
+        self._last_play_state_check = now
         result = read_game_state(self.settings.state_file)
         state = result.get("data")
-        self._publish_state(state if isinstance(state, dict) else None)
+        self._publish_state(state if isinstance(state, dict) else None, force=False)
 
     def _write_bridge_status(self, force: bool = False) -> None:
         path = self.settings.bridge_status_file
@@ -480,9 +570,19 @@ class ChesterApp:
 
     def _ignore_existing_mod_requests(self, path: Path) -> None:
         existing = self._load_mod_request_events(path)
-        self._seen_request_ids.update(self._request_id(event) for event in existing)
+        for event in existing:
+            self._remember_request_id(self._request_id(event))
         if existing:
             LOGGER.info("忽略启动前已有的 Mod 请求：%s 个事件", len(existing))
+
+    def _remember_request_id(self, request_id: str) -> None:
+        if request_id in self._seen_request_ids:
+            return
+        self._seen_request_ids.add(request_id)
+        self._seen_request_order.append(request_id)
+        while len(self._seen_request_order) > SEEN_REQUEST_ID_LIMIT:
+            expired = self._seen_request_order.popleft()
+            self._seen_request_ids.discard(expired)
 
     @staticmethod
     def _request_id(request: dict[str, object]) -> str:
@@ -516,7 +616,8 @@ class ChesterApp:
             values = [document]
         else:
             return []
-        return [value for value in values if isinstance(value, dict)]
+        events = [value for value in values if isinstance(value, dict)]
+        return events[-REQUEST_EVENT_WINDOW_LIMIT:]
 
     def _read_mod_requests(self, path: Path) -> list[dict[str, object]]:
         found: list[dict[str, object]] = []
@@ -524,7 +625,7 @@ class ChesterApp:
             request_id = self._request_id(request)
             if request_id in self._seen_request_ids:
                 continue
-            self._seen_request_ids.add(request_id)
+            self._remember_request_id(request_id)
             found.append(request)
         return found
 

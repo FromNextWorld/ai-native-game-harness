@@ -7,7 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from dont_starve_ai_mod.app import ChesterApp, build_chat_context, write_reply
+from dont_starve_ai_mod.app import (
+    REQUEST_EVENT_WINDOW_LIMIT,
+    SEEN_REQUEST_ID_LIMIT,
+    ChesterApp,
+    build_chat_context,
+    write_reply,
+)
 
 
 class FakeGateway:
@@ -69,10 +75,26 @@ class ModRequestTests(unittest.TestCase):
             worker.start()
             result = app._on_harness_request(
                 "game.atom.execute",
-                {"atom": "dst.find_nearest_butterfly", "arguments": {"radius": 20}},
+                {"atom": "dst.find_nearest_entity", "arguments": {"radius": 20}},
             )
             worker.join(timeout=2)
             self.assertEqual(result, {"targetId": 42})
+
+    def test_game_atom_timeout_expires_and_cancels_disk_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app, _ = self.make_app(Path(directory))
+            app.settings.request_timeout_seconds = 120.0
+            app.settings.state_file.write_text("{}", encoding="utf-8")
+            monotonic_values = iter([100.0, 100.0, 129.9, 130.0])
+            with (
+                patch("dont_starve_ai_mod.app.time.monotonic", side_effect=lambda: next(monotonic_values)),
+                patch("dont_starve_ai_mod.app.time.sleep"),
+                self.assertRaisesRegex(RuntimeError, "等待 Lua Mod 执行超时"),
+            ):
+                app._execute_game_atom("dst.find_nearest_entity", {"radius": 20})
+            command = json.loads(app.settings.skill_command_file.read_text(encoding="utf-8"))
+            self.assertTrue(command["cancelled"])
+            self.assertEqual(command["lease_until_unix"], 0)
 
     def test_reads_new_json_events_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -127,6 +149,42 @@ class ModRequestTests(unittest.TestCase):
             self.assertNotIn("KU_world_session", json.dumps(payload["observation"]))
             self.assertEqual(len(payload["saveId"]), 64)
             self.assertNotIn("KU_world_session", payload["saveId"])
+
+    def test_periodic_state_sync_sends_changes_and_five_second_heartbeat_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app, gateway = self.make_app(Path(directory))
+            state = {"player": {"name": "Wilson", "health_percent": 1.0}}
+            app.settings.state_file.write_text(json.dumps(state), encoding="utf-8")
+            with patch("dont_starve_ai_mod.app.time.monotonic", side_effect=[10.0, 10.0, 11.0, 11.0, 12.0, 12.0, 17.0, 17.0]):
+                app._publish_play_heartbeat()
+                app._publish_play_heartbeat()
+                state["player"]["health_percent"] = 0.75
+                app.settings.state_file.write_text(json.dumps(state), encoding="utf-8")
+                app._publish_play_heartbeat()
+                app._publish_play_heartbeat()
+            self.assertEqual(len(gateway.notifications), 3)
+            self.assertEqual(
+                gateway.notifications[1][1]["observation"]["player"]["vitals"]["health"]["ratio"],
+                0.75,
+            )
+
+    def test_state_fingerprint_ignores_capture_timestamp(self) -> None:
+        first = {"meta": {"capturedAt": "2026-09-05T00:00:00Z"}, "player": {"name": "Wilson"}}
+        second = {"meta": {"capturedAt": "2026-09-05T00:00:01Z"}, "player": {"name": "Wilson"}}
+        self.assertEqual(ChesterApp._state_fingerprint(first), ChesterApp._state_fingerprint(second))
+
+    def test_request_reader_and_seen_cache_are_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            app, _ = self.make_app(Path(directory))
+            events = [
+                {"id": str(index), "action": "start_recording"}
+                for index in range(SEEN_REQUEST_ID_LIMIT + 50)
+            ]
+            app.settings.request_file.write_text(json.dumps({"events": events}), encoding="utf-8")
+            found = app._read_mod_requests(app.settings.request_file)
+            self.assertEqual(len(found), REQUEST_EVENT_WINDOW_LIMIT)
+            self.assertLessEqual(len(app._seen_request_ids), SEEN_REQUEST_ID_LIMIT)
+            self.assertLessEqual(len(app._seen_request_order), SEEN_REQUEST_ID_LIMIT)
 
     def test_retry_routes_to_harness_in_a_background_thread(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

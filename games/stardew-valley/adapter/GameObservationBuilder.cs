@@ -4,6 +4,7 @@ using System.Linq;
 using Microsoft.Xna.Framework;
 using StardewAgentMod.Game;
 using StardewAgentMod.Game.Companion;
+using StardewAgentMod.Game.Combat;
 using StardewValley;
 using StardewValley.Monsters;
 using StardewValley.TerrainFeatures;
@@ -16,7 +17,8 @@ internal static class GameObservationBuilder
         CompanionGrowthSnapshot? companionGrowth = null,
         CompanionRuntimeSnapshot? companionRuntime = null,
         CompanionLifeSnapshot? companionLife = null,
-        IReadOnlyDictionary<string, bool>? abilities = null)
+        IReadOnlyDictionary<string, bool>? abilities = null,
+        ProjectileGroup.LiveState? projectiles = null)
     {
         Farmer player = Game1.player;
         GameLocation location = Game1.currentLocation;
@@ -132,6 +134,7 @@ internal static class GameObservationBuilder
                 growth = companionGrowth,
                 life = companionLife,
                 abilities,
+                projectiles,
                 stamina = companionRuntime is null
                     ? null
                     : new

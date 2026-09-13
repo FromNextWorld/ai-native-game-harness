@@ -39,6 +39,7 @@ namespace DoubaoAI.ONI
         private float _lastFairyMovementAt;
         private int _facingFrame;
         private FairyWaterSkillSystem _waterSkill;
+        private readonly WaterTransferEffect _waterEffect = new WaterTransferEffect();
         private float _nextWaterContactScanAt;
         private int _panelTab;
         private bool _voiceKeyHeld;
@@ -52,6 +53,8 @@ namespace DoubaoAI.ONI
             _bridge.Notification += OnHarnessNotification;
             _bridge.ToolExecution += ExecuteHarnessTool;
             _waterSkill = new FairyWaterSkillSystem();
+            _waterSkill.LateResult += ShowWaterResult;
+            _waterSkill.TransferConfirmed += _waterEffect.Play;
             string assets = Path.Combine(ModPaths.ContentPath, "assets");
             _sprite = TextureLoader.LoadPng(Path.Combine(assets, "doubao_companion.png"));
             _fallbackSprite = TextureLoader.LoadPng(Path.Combine(assets, "doubao_t.png"));
@@ -64,6 +67,8 @@ namespace DoubaoAI.ONI
         {
             PlayerCommandExecutor.Tick();
             _bridge.Tick();
+            _waterSkill?.Tick();
+            _waterEffect.Tick();
             GameSnapshot snapshot = SafeCollectSnapshot();
             PlayerCommandSnapshot command = SafeCollectCommandSnapshot();
             _bridge.PublishState(snapshot, command);
@@ -252,19 +257,17 @@ namespace DoubaoAI.ONI
             }
         }
 
-        private PlayerCommandExecutionResult ExecuteHarnessTool(string name, JObject args)
+        private void ExecuteHarnessTool(string name, JObject args, Action<PlayerCommandExecutionResult> complete)
         {
             if (name == "oni_companion_follow")
-                return ChangeFollowedMinion((int?)args["actorId"] ?? -1);
+            { complete(ChangeFollowedMinion((int?)args["actorId"] ?? -1)); return; }
             if (name == "oni_companion_absorb_water" || name == "oni_companion_spray_water")
             {
-                PlayerCommandExecutionResult result = name == "oni_companion_absorb_water"
-                    ? _waterSkill.Absorb((int?)args["targetCell"] ?? Grid.InvalidCell, ResolveFollowedMinion())
-                    : _waterSkill.Spray((int?)args["targetCell"] ?? Grid.InvalidCell, ResolveFollowedMinion());
-                _reply = result.Reply;
-                _status = result.Success ? "水团术发动成功" : "水团术没有发动";
-                _bubbleUntil = Time.unscaledTime + 10f;
-                return result;
+                Action<PlayerCommandExecutionResult> waterComplete = result => { ShowWaterResult(result); complete(result); };
+                if (name == "oni_companion_absorb_water")
+                    _waterSkill.Absorb((int?)args["targetCell"] ?? Grid.InvalidCell, ResolveFollowedMinion(), waterComplete);
+                else _waterSkill.Spray((int?)args["targetCell"] ?? Grid.InvalidCell, ResolveFollowedMinion(), waterComplete);
+                return;
             }
 
             var plan = new PlayerCommandPlan
@@ -280,8 +283,16 @@ namespace DoubaoAI.ONI
             else if (name == "oni_dig") plan.Action = "dig";
             else if (name == "oni_dig_path") plan.Action = "dig_path";
             else if (name == "oni_build") plan.Action = "build";
-            else return new PlayerCommandExecutionResult { Success = false, Reply = "未知缺氧工具：" + name };
-            return PlayerCommandExecutor.Execute(plan);
+            else { complete(new PlayerCommandExecutionResult { Success = false, Reply = "未知缺氧工具：" + name }); return; }
+            complete(PlayerCommandExecutor.Execute(plan));
+        }
+
+        private void ShowWaterResult(PlayerCommandExecutionResult result)
+        {
+            _reply = result.Reply;
+            _status = result.Success ? "水团术已由游戏确认" : "水团术未确认成功";
+            _floatingStatus = string.Empty;
+            _bubbleUntil = Time.unscaledTime + 10f;
         }
 
         private void OnHarnessNotification(string method, string text)
@@ -334,6 +345,7 @@ namespace DoubaoAI.ONI
         {
             EnsureStyles();
             bool hasAnchor = TryGetFairyAnchor(out Rect anchor);
+            if (hasAnchor) _waterEffect.Draw(anchor, _statusStyle);
             Texture2D shown = _sprite != null ? _sprite : _fallbackSprite;
             if (hasAnchor && shown != null)
             {
@@ -411,7 +423,7 @@ namespace DoubaoAI.ONI
             GUI.Box(new Rect(20, 120, 460, 300), GUIContent.none);
             string description = learned
                 ? string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                    "储水囊：{0:0.#}/{1:0} kg\n当前液体：{2}\n\n吸水\n鼠标指向12格内的水，对我说“吸这里的水”。最多保存一格水，真实保留种类、温度和病菌。\n\n喷水\n鼠标指向12格内的空格，对我说“向这里喷水”。每次喷出最多{3:0} kg。",
+                    "储水囊：{0:0.#}/{1:0} kg\n当前液体：{2}\n\n吸水\n指向12格内的水，说“吸这里的水”。保留水种、温度和病菌；喷完可换另一种水。\n\n喷水\n空气、真空、液面都能喷，指地板会喷到正上方。每次最多{3:0} kg，真实液滴自然下落积水；水流和数字仅在确认后显示。",
                     _waterSkill.StoredMassKg, FairyWaterSkillSystem.CapacityKg,
                     _waterSkill.StoredElementName, FairyWaterSkillSystem.SprayMassKg)
                 : "学习方式\n让跟随的复制人带着我接触水、污染水、盐水或浓盐水。\n\n第一次真正碰到水后，我会自动觉醒吸水和喷水，不需要技能点。";
@@ -449,6 +461,8 @@ namespace DoubaoAI.ONI
         private void OnDestroy()
         {
             PlayerCommandExecutor.Reset();
+            _waterSkill?.Dispose();
+            _waterEffect.Dispose();
             if (_voiceKeyHeld && _bridge != null) _bridge.StopVoice();
             if (_bridge != null) _bridge.Dispose();
             if (_sprite != null) Destroy(_sprite);

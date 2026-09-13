@@ -33,8 +33,9 @@ const EMPTY_SESSION_STATS = Object.freeze({
 const MAX_TRACES = 500
 const CHAT_TIMEOUT_MS = 10 * 60_000
 const STREAM_INITIAL_OPEN_TIMEOUT_MS = 30_000
-const DIAGNOSTIC_KINDS = new Set(['game-agent.latency', 'voice.latency', 'voice.failed'])
+const DIAGNOSTIC_KINDS = new Set(['game-agent.latency', 'voice.latency', 'voice.failed', 'voice.readiness'])
 const DIAGNOSTIC_DETAIL_KEYS = {
+  'voice.readiness': new Set(['enabled', 'asr', 'tts', 'media', 'microphone']),
   'game-agent.latency': new Set(['source', 'provider', 'model', 'modelSelectionMs', 'captureMs', 'attachmentMs', 'agentReadyMs', 'firstTextMs', 'agentWaitMs', 'totalMs']),
   'voice.latency': new Set(['source', 'processId', 'asrMs', 'agentMs', 'ttsMs', 'totalMs', 'speechStreamed']),
   'voice.failed': new Set(['source', 'processId', 'stage', 'errorName', 'timeout', 'elapsedMs']),
@@ -309,6 +310,9 @@ export class DshProductRuntime {
   #listeners = new Set()
   #streamTasks = []
   #sockets = new Set()
+  #streamStops = new Set()
+  #reconnectWakeups = new Set()
+  #closing
   #stopped = true
   #muxConnected = false
   #hostConnected = false
@@ -326,6 +330,7 @@ export class DshProductRuntime {
   #workRelayTurns = new Map()
   #notifications = []
   #forceNewSession
+  #voiceReadiness
 
   constructor({ baseUrl, cwd, adapterUrl, forceNewSession = false, fetchImpl = fetch, WebSocketImpl = WebSocket }) {
     this.#baseUrl = baseUrl.replace(/\/$/, '')
@@ -337,6 +342,7 @@ export class DshProductRuntime {
   }
 
   async start() {
+    if (this.#closing) await this.#closing
     if (!this.#stopped) return this.info()
     this.#stopped = false
     try {
@@ -398,6 +404,7 @@ export class DshProductRuntime {
         hiddenReasoning: 'not-exposed',
         directActions: false,
         notifications: structuredClone(this.#notifications),
+        voiceReadiness: this.#voiceReadiness,
       },
     })
   }
@@ -449,6 +456,7 @@ export class DshProductRuntime {
   attachDiagnosticRecord(value) {
     const record = normalizeProductDiagnostic(value)
     if (!record) return false
+    if (record.kind === 'voice.readiness') this.#voiceReadiness = { ...record.detail }
     this.#appendSessionTrace({
       traceId: `diagnostic:${record.id}`,
       sessionId: record.sessionId ?? this.#sessionId ?? 'dsh-diagnostic',
@@ -507,25 +515,37 @@ export class DshProductRuntime {
     throw new Error('AI Native Game Harness 产品链路不允许页面绕过 Agent 直接调用游戏动作。')
   }
 
-  async close() {
+  close() {
+    if (this.#closing) return this.#closing
     this.#stopped = true
-    if (this.#pendingChat && this.#sessionId) {
-      await this.#rpc('session.cancel', { sessionId: this.#sessionId }).catch(() => undefined)
-    }
-    this.#pendingChat?.reject(new Error('AI Runtime 已停止。'))
-    for (const socket of this.#sockets) socket.close()
-    await Promise.allSettled(this.#streamTasks)
-    this.#streamTasks = []
-    this.#sockets.clear()
+    this.#closing = (async () => {
+      let cancelTimer
+      const cancel = this.#pendingChat && this.#sessionId
+        ? Promise.race([
+          this.#rpc('session.cancel', { sessionId: this.#sessionId }, 1_000).catch(() => undefined),
+          new Promise(resolve => { cancelTimer = setTimeout(resolve, 1_000) }),
+        ]).finally(() => clearTimeout(cancelTimer)) : Promise.resolve()
+      for (const wake of this.#reconnectWakeups) wake()
+      for (const socket of this.#sockets) { try { socket.close() } catch {} }
+      // Do not wait indefinitely for a peer's WebSocket close handshake.
+      const forceTimer = setTimeout(() => {
+        for (const stop of [...this.#streamStops]) stop()
+      }, 250)
+      try { await Promise.allSettled(this.#streamTasks) }
+      finally { clearTimeout(forceTimer); this.#streamTasks = []; this.#sockets.clear() }
+      await cancel
+      this.#pendingChat?.reject(new Error('AI Runtime 已停止。'))
+    })().finally(() => { this.#closing = undefined })
+    return this.#closing
   }
 
-  async #rpc(method, payload) {
+  async #rpc(method, payload, timeoutMs = 30_000) {
     const rpcId = randomUUID()
     const response = await this.#fetch(`${this.#baseUrl}/api/${method}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ type: 'client-request', rpcId, method, payload }),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(timeoutMs),
     })
     if (!response.ok) throw new Error(`AI Runtime ${method} 请求失败：HTTP ${response.status}`)
     const envelope = await response.json()
@@ -558,6 +578,9 @@ export class DshProductRuntime {
       this.#appendTrace('dsh.stream.open-failed', { channel, error: asErrorMessage(error) })
     })
     this.#streamTasks.push(task)
+    void task.then(() => {
+      if (!opened) { clearTimeout(openTimeout); rejectOpen(new Error('AI Runtime 事件流已停止。')) }
+    })
     return initialOpen.finally(() => clearTimeout(openTimeout))
   }
 
@@ -585,7 +608,11 @@ export class DshProductRuntime {
       if (this.#stopped) break
       this.#reconnectCount += 1
       this.#publish()
-      await new Promise((resolve) => setTimeout(resolve, Math.min(2_000, 150 * this.#reconnectCount)))
+      await new Promise((resolve) => {
+        const wake = () => { clearTimeout(timer); this.#reconnectWakeups.delete(wake); resolve() }
+        const timer = setTimeout(wake, Math.min(2_000, 150 * this.#reconnectCount))
+        this.#reconnectWakeups.add(wake)
+      })
     }
   }
 
@@ -595,12 +622,19 @@ export class DshProductRuntime {
       url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
       const socket = new this.#WebSocket(url)
       this.#sockets.add(socket)
+      const finish = () => { this.#streamStops.delete(stop); this.#sockets.delete(socket); resolve() }
+      const stop = () => {
+        try { socket.terminate() } catch {} finally { finish() }
+      }
+      this.#streamStops.add(stop)
       let opened = false
       socket.once('open', () => {
+        if (this.#stopped) { stop(); return }
         opened = true
         onOpen()
       })
       socket.on('message', (data) => {
+        if (this.#stopped) return
         try {
           const envelope = JSON.parse(typeof data === 'string' ? data : data.toString())
           if (envelope?.type === 'server-request' && envelope.payload) onFrame(envelope.payload)
@@ -611,10 +645,7 @@ export class DshProductRuntime {
       socket.once('error', (error) => {
         if (!opened) reject(error)
       })
-      socket.once('close', () => {
-        this.#sockets.delete(socket)
-        resolve()
-      })
+      socket.once('close', finish)
     })
   }
 

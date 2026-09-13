@@ -79,6 +79,9 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $entryPath -PathType Le
 }
 
 $artifactRoot = Join-Path $repoRoot '.artifacts/xiaotangyuan'
+& (Join-Path $repoRoot 'games/dont-starve-together/scripts/build-player-package.ps1') -OutputDirectory (Join-Path $repoRoot '.artifacts/dst-package') -SkipBuild
+if ($LASTEXITCODE -ne 0) { throw 'DST integrated TS package failed' }
+
 $profileHome = Join-Path $artifactRoot 'dsh-home'
 $runtimeRoot = Join-Path $artifactRoot 'desktop-runtime'
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null

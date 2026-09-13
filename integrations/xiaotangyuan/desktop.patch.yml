@@ -10,41 +10,37 @@
 - id: llm-pi-ai
   config:
     providers:
-      zhipu:
-        displayName: 智谱 AI
-        apiKeyEnv: ZHIPU_API_KEY
+      minimax:
+        displayName: MiniMax
+        apiKeyEnv: GAME_MINIMAX_API_KEY
         api: openai-completions
-        baseURL: https://open.bigmodel.cn/api/paas/v4
-        defaultMaxTokens: 131072
+        baseURL: https://api.minimax.cn/v1
+        defaultMaxTokens: 8192
         models:
-          - id: glm-5.2
-            name: GLM-5.2
-            contextWindow: 1048576
+          - id: MiniMax-M3
+            name: MiniMax-M3
+            contextWindow: 1000000
             input:
               - text
+              - image
             reasoningEfforts:
+              off: null
               max: max
             compat:
               supportsReasoningEffort: true
               thinkingFormat: zai
-          - id: glm-5v-turbo
-            name: GLM-5V-Turbo
-            contextWindow: 204800
-            input:
-              - text
-              - image
 
 - id: agent-default-model
   config:
-    provider: zhipu
-    model: glm-5.2
-    reasoningEffort: max
+    provider: minimax
+    model: MiniMax-M3
+    reasoningEffort: off
 
 - id: work-orchestrator
   config:
     enabled: true
-    provider: zhipu
-    model: glm-5.2
+    provider: minimax
+    model: MiniMax-M3
     reasoningEffort: max
 
 - id: xiaotangyuan-game
@@ -52,8 +48,10 @@
     port: 33145
     vision:
       enabled: true
-      provider: zhipu
-      model: glm-5v-turbo
+      provider: minimax
+      model: MiniMax-M3
+      reasoningEffort: off
+      strictModel: true
       maxWidth: 768
     speech:
       enabled: true

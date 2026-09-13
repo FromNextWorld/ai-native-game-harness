@@ -32,6 +32,32 @@ class MockTools {
 }
 
 describe('Fake Game vertical slice', () => {
+  it('bounds the per-save observation cache and keeps recently used saves', async () => {
+    const ctx = new Context()
+    const coreFiber = await ctx.plugin(gameCorePlugin)
+    for (let index = 0; index < gameCorePlugin.MAX_CACHED_OBSERVATIONS; index += 1) {
+      ctx.gameCore.updateObservation({
+        gameId: 'cache-test',
+        saveId: `save-${index}`,
+        revision: 1,
+        observedAt: new Date(0).toISOString(),
+        state: { index },
+      })
+    }
+    expect(ctx.gameCore.getObservation('cache-test', 'save-0')).toBeDefined()
+    ctx.gameCore.updateObservation({
+      gameId: 'cache-test',
+      saveId: 'save-new',
+      revision: 1,
+      observedAt: new Date(0).toISOString(),
+      state: { index: 'new' },
+    })
+    expect(ctx.gameCore.getObservation('cache-test', 'save-0')).toBeDefined()
+    expect(ctx.gameCore.getObservation('cache-test', 'save-1')).toBeUndefined()
+    expect(ctx.gameCore.getObservation('cache-test', 'save-new')).toBeDefined()
+    await coreFiber.dispose()
+  })
+
   it('keeps native game rules authoritative inside the Bridge', async () => {
     const bridge = new FakeNativeBridge()
     await expect(bridge.request('game.collect', {}, new AbortController().signal))

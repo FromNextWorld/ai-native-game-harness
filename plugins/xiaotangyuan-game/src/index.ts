@@ -25,6 +25,8 @@ export const name = 'dsh-xiaotangyuan-game'
 export const provide = 'xiaotangyuanLearning'
 export const inject = ['agentDefaultModel', 'agents', 'attachments', 'credentials', 'llm', 'sessions', 'sessionTitle', 'systemPrompt', 'tools', 'workOrchestrator']
 
+import { registerConfiguredSpeechExtension } from './runtime/providers/speech-extension.js'
+
 export function apply(ctx: Context, config: Config = {}): void {
   const resolved = resolveConfig(config)
   const feedback = resolved.feedback.enabled ? new SignedFeedbackClient(ctx, resolved.feedback) : undefined
@@ -63,11 +65,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       processId => media.stopRecording(processId),
       resolved.adapterProtocolUrl,
     )
-    await gateway.start()
     const capabilities = new CapabilityRegistry()
     const speechProvider = new VolcengineSpeechProvider(ctx, resolved.speech)
     capabilities.register('speech.transcribe', speechProvider)
     capabilities.register('speech.synthesize', speechProvider)
+    await registerConfiguredSpeechExtension(ctx, capabilities, config.speech)
+    await gateway.start()
     speech = new SpeechController(ctx, resolved.speech, media, gateway, capabilities)
     void speech.start().catch(error => {
       ctx.logger.warn('xiaotangyuan-game: 语音运行时启动失败')

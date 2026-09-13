@@ -202,7 +202,7 @@ try {
   const modelPort = await listen(mock.server)
   await mkdir(dshHome, { recursive: true })
   const runtimePatchPath = resolve(dshHome, 'xiaotangyuan-runtime-smoke.patch.yml')
-  await writeFile(runtimePatchPath, `- id: xiaotangyuan-game\n  config:\n    port: ${gatewayPort}\n- id: xiaotangyuan-oni-adapter\n  config:\n    port: ${gatewayPort}\n`, 'utf8')
+  await writeFile(runtimePatchPath, `- id: xiaotangyuan-game\n  config:\n    port: ${gatewayPort}\n    vision:\n      provider: smoke-local\n      model: smoke-vision\n      strictModel: true\n- id: xiaotangyuan-oni-adapter\n  config:\n    port: ${gatewayPort}\n`, 'utf8')
   const settingsPath = resolve(dshHome, 'settings.yaml')
   const settings = `llm-pi-ai:\n  providers:\n    smoke-local:\n      displayName: Local Smoke Model\n      apiKeyEnv: XIAOTANGYUAN_SMOKE_API_KEY\n      api: openai-completions\n      baseURL: http://127.0.0.1:${modelPort}/v1\n      models:\n        - id: smoke-vision\n          name: Smoke Vision\n          contextWindow: 32768\n          maxTokens: 1024\n          input:\n            - text\n            - image\nagent-default-model:\n  provider: smoke-local\n  model: smoke-vision\n`
   await writeFile(settingsPath, settings, 'utf8')
@@ -268,7 +268,7 @@ try {
       context: { saveId: 'runtime-smoke-save' },
     }, Math.max(30000, timeoutMs))
     if (chat?.reply !== '小汤圆桌面运行时冒烟测试通过。') {
-      throw new Error(`unexpected chat reply: ${JSON.stringify(chat)}`)
+      throw new Error(`unexpected chat reply (localModelRequests=${mock.requestCount()}): ${JSON.stringify(chat)}`)
     }
     if (typeof chat?.sessionId !== 'string' || chat.sessionId === '') {
       throw new Error(`first chat did not return a sessionId: ${JSON.stringify(chat)}`)

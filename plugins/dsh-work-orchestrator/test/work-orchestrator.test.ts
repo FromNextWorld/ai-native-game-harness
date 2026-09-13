@@ -110,6 +110,7 @@ function fakeHandle(
         }
       }
       events.push(assistantEvent(events.length, typeof response === 'string' ? response : response.text))
+      session.append('turn/end', { reason: { kind: 'completed' } })
     },
     whenIdle: async () => undefined,
     cancel: () => undefined,
@@ -162,6 +163,14 @@ function config(directory: string) {
 }
 
 describe('DSH Work Orchestrator', () => {
+  it('rejects partial office text when whenIdle resolves after a contained error', async () => {
+    const service = Object.create(WorkOrchestratorService.prototype)
+    const handle = fakeHandle('failed-office', () => '文档已经完成')
+    handle.agent.whenIdle = async () => {
+      handle.agent.session.append('turn/end', { reason: { kind: 'error', error: { code: 'TRANSPORT', message: 'provider disconnected' } } } as never)
+    }
+    await expect(service.runWorkerSession({ handle }, '查询进度')).rejects.toThrow('provider disconnected')
+  })
   it('validates independent plugin configuration and parses bounded intents', () => {
     expect(resolveConfig({ provider: 'zai', model: 'glm-5.2' }).selection).toMatchObject({ provider: 'zai', model: 'glm-5.2' })
     expect(resolveConfig({ executor: 'codex-app-server' } as never)).not.toHaveProperty('executor')

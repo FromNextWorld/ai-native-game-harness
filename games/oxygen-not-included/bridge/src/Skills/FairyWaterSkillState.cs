@@ -8,6 +8,8 @@ namespace DoubaoAI.ONI.Skills
         public float StoredTemperatureKelvin { get; set; }
         public byte StoredDiseaseIndex { get; set; } = byte.MaxValue;
         public int StoredDiseaseCount { get; set; }
+        // A persisted intent prevents an uncertain simulation request being replayed after reload.
+        public string PendingTransfer { get; set; }
 
         internal void Normalize(float capacityKg)
         {

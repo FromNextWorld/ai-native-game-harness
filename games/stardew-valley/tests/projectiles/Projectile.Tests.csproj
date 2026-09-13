@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../adapter/Game/Combat/ProjectileGeometry.cs" Link="ProjectileGeometry.cs" />
+    <Compile Include="../../adapter/Game/Combat/ProjectileGroup.cs" Link="ProjectileGroup.cs" />
+    <Compile Include="../../adapter/GameAgentClient.cs" Link="GameAgentClient.cs" />
+    <Compile Include="../../adapter/Harness/MainThreadDispatcher.cs" Link="MainThreadDispatcher.cs" />
+  </ItemGroup>
+</Project>

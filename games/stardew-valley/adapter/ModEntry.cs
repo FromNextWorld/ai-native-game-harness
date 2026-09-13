@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using StardewModdingAPI;
@@ -13,6 +14,7 @@ using StardewAgentMod.Game;
 using StardewAgentMod.Game.Abilities;
 using StardewAgentMod.Game.Actions;
 using StardewAgentMod.Game.Companion;
+using StardewAgentMod.Game.Combat;
 using StardewAgentMod.Game.Fishing;
 using StardewAgentMod.Game.Flight;
 using StardewAgentMod.Game.Narrative;
@@ -37,6 +39,7 @@ public sealed class ModEntry : Mod
     private FlightController flight = null!;
     private FishAssist fishAssist = null!;
     private MineCombatAssist mineCombatAssist = null!;
+    private ProjectileGroup projectileGroup = null!;
     private RescueAssist rescueAssist = null!;
     private SpeechBubble speechBubble = null!;
     private CompanionEffects companionEffects = null!;
@@ -51,6 +54,11 @@ public sealed class ModEntry : Mod
     private string? currentSaveId;
     private bool textRequestInFlight;
     private bool observationInFlight;
+    private bool observationPublishPending;
+    private bool observationPublishPendingForce;
+    private string? observationInFlightFingerprint;
+    private string? lastPublishedObservationFingerprint;
+    private DateTimeOffset lastObservationPublishedAt = DateTimeOffset.MinValue;
     private bool voiceKeyHeld;
     private Task<bool>? voiceStartTask;
     private string? assistantStatus;
@@ -111,6 +119,8 @@ public sealed class ModEntry : Mod
                 this.stamina.BuildExhaustedLine(Game1.timeOfDay))),
             () => true);
         this.mineCombatAssist = new MineCombatAssist(this.Monitor, () => true);
+        this.projectileGroup = new ProjectileGroup(this.companion.TryGetWorldPosition,
+            () => this.flight.IsAirborne || this.flight.IsTransitioning, this.abilities, this.stamina, this.Monitor, resourceFinder: SwordResourceTargets.Find);
         this.rescueAssist = new RescueAssist(this.Monitor);
         var actionModule = new StardewActionModule(
             this.Monitor,
@@ -129,7 +139,8 @@ public sealed class ModEntry : Mod
             this.flight,
             this.mineCombatAssist,
             this.rescueAssist,
-            actionModule);
+            actionModule,
+            this.projectileGroup);
         this.protocolClient = new AdapterProtocolClient(
             this.config.AdapterProtocolUrl,
             this.gameAdapter,
@@ -140,7 +151,20 @@ public sealed class ModEntry : Mod
                 "assistant.status",
                 connected ? "Harness 动作通道已连接" : "Harness 动作通道正在重连")));
         this.protocolClient.Start();
-        this.client = new GameAgentClient(this.config.GatewayUrl);
+        this.client = new GameAgentClient(this.config.GatewayUrl,
+            (atom, args, token) => this.harnessDispatcher.InvokeAsync<object>(() => JsonSerializer.SerializeToElement(this.projectileGroup.Execute(atom, args)), token));
+        this.client.TransportClosed += () => this.mainThreadActions.Enqueue(() => this.projectileGroup.Cancel("聊天连接已断开，已停止投射物。"));
+        helper.ConsoleCommands.Add("agh_projectiles", "Generic projectile atom diagnostic: create|formation|launch|status|cancel followed by JSON. No automatic choreography.", (_, args) =>
+        {
+            try
+            {
+                if (args.Length < 1) throw new ArgumentException("需要原子动作名和 JSON 参数。");
+                using var json = JsonDocument.Parse(args.Length > 1 ? string.Join(" ", args, 1, args.Length - 1) : "{}");
+                this.Monitor.Log(JsonSerializer.Serialize(this.projectileGroup.Execute(ProjectileGroup.Prefix + args[0], json.RootElement)), LogLevel.Info);
+            }
+            catch (Exception ex) { this.Monitor.Log(ex.Message, LogLevel.Warn); }
+        });
+        helper.Events.Input.ButtonPressed += (_, e) => { if (e.Button == SButton.Escape) this.projectileGroup.Cancel("玩家按 Esc 停止。"); };
         this.client.AdapterProtocolEndpointDiscovered += endpoint => this.mainThreadActions.Enqueue(() =>
         {
             try
@@ -265,6 +289,7 @@ public sealed class ModEntry : Mod
         }
 
         this.voiceKeyHeld = true;
+        this.QueueObservationPublish(force: true);
         this.speechBubble.ShowStatus("正在连接麦克风……");
         Game1.addHUDMessage(new HUDMessage("小汤圆正在连接麦克风……", HUDMessage.newQuest_type));
         this.voiceStartTask = this.StartVoiceInputAsync();
@@ -274,6 +299,7 @@ public sealed class ModEntry : Mod
     {
         if (e.Button != this.config.VoiceChatKey || !this.voiceKeyHeld) return;
         this.voiceKeyHeld = false;
+        this.QueueObservationPublish(force: true);
         Task<bool>? startTask = this.voiceStartTask;
         this.voiceStartTask = null;
         if (startTask is not null) _ = this.StopVoiceInputAsync(startTask);
@@ -387,18 +413,39 @@ public sealed class ModEntry : Mod
     {
         if (!Context.IsWorldReady) return;
         this.growth.Update();
-        if (this.observationInFlight) return;
-        this.latestObservation = this.CaptureObservation();
-        this.observationInFlight = true;
-        _ = this.PublishObservationAsync(this.latestObservation);
+        this.QueueObservationPublish(force: false);
     }
 
-    private async Task PublishObservationAsync(object observation)
+    private void QueueObservationPublish(bool force)
     {
+        if (!Context.IsWorldReady) return;
+        this.latestObservation = this.CaptureObservation();
+        string fingerprint = ComputeObservationFingerprint(this.latestObservation);
+        bool heartbeatDue = DateTimeOffset.UtcNow - this.lastObservationPublishedAt >= TimeSpan.FromSeconds(5);
+        if (!force && fingerprint == this.lastPublishedObservationFingerprint && !heartbeatDue)
+            return;
+        if (this.observationInFlight)
+        {
+            if (force || fingerprint != this.observationInFlightFingerprint || heartbeatDue)
+            {
+                this.observationPublishPending = true;
+                this.observationPublishPendingForce |= force;
+            }
+            return;
+        }
+        this.observationInFlight = true;
+        this.observationInFlightFingerprint = fingerprint;
+        _ = this.PublishObservationAsync(this.latestObservation, fingerprint);
+    }
+
+    private async Task PublishObservationAsync(object observation, string fingerprint)
+    {
+        bool published = false;
         try
         {
             using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(10));
             await this.client.PublishObservationAsync(observation, timeout.Token).ConfigureAwait(false);
+            published = true;
         }
         catch (Exception ex)
         {
@@ -406,7 +453,58 @@ public sealed class ModEntry : Mod
         }
         finally
         {
-            this.mainThreadActions.Enqueue(() => this.observationInFlight = false);
+            this.mainThreadActions.Enqueue(() =>
+            {
+                this.observationInFlight = false;
+                this.observationInFlightFingerprint = null;
+                if (published)
+                {
+                    this.lastPublishedObservationFingerprint = fingerprint;
+                    this.lastObservationPublishedAt = DateTimeOffset.UtcNow;
+                }
+                if (!this.observationPublishPending) return;
+                bool pendingForce = this.observationPublishPendingForce;
+                this.observationPublishPending = false;
+                this.observationPublishPendingForce = false;
+                this.QueueObservationPublish(pendingForce);
+            });
+        }
+    }
+
+    private static string ComputeObservationFingerprint(object observation)
+    {
+        using JsonDocument document = JsonDocument.Parse(JsonSerializer.Serialize(observation));
+        using MemoryStream stream = new();
+        using (Utf8JsonWriter writer = new(stream))
+        {
+            WriteStableObservation(writer, document.RootElement);
+        }
+        return Convert.ToHexString(SHA256.HashData(stream.ToArray()));
+    }
+
+    private static void WriteStableObservation(Utf8JsonWriter writer, JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                writer.WriteStartObject();
+                foreach (JsonProperty property in element.EnumerateObject())
+                {
+                    if (property.NameEquals("capturedAt")) continue;
+                    writer.WritePropertyName(property.Name);
+                    WriteStableObservation(writer, property.Value);
+                }
+                writer.WriteEndObject();
+                break;
+            case JsonValueKind.Array:
+                writer.WriteStartArray();
+                foreach (JsonElement item in element.EnumerateArray())
+                    WriteStableObservation(writer, item);
+                writer.WriteEndArray();
+                break;
+            default:
+                element.WriteTo(writer);
+                break;
         }
     }
 
@@ -419,6 +517,7 @@ public sealed class ModEntry : Mod
         this.appearance.Update();
         this.fishAssist.OnUpdateTicked(sender, e);
         this.mineCombatAssist.OnUpdateTicked(sender, e);
+        this.projectileGroup.Update();
         this.rescueAssist.OnUpdateTicked(sender, e);
     }
 
@@ -428,12 +527,14 @@ public sealed class ModEntry : Mod
         this.bombFishing.Draw(e.SpriteBatch);
         this.flight.Draw(e.SpriteBatch);
         this.companionEffects.Draw(e.SpriteBatch);
+        this.projectileGroup.Draw(e.SpriteBatch);
         this.companionHud.Draw(e.SpriteBatch);
         this.speechBubble.Draw(e.SpriteBatch, this.config.BubbleYOffset);
     }
 
     private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
     {
+        this.projectileGroup.Reset();
         byte[] digest = SHA256.HashData(Encoding.UTF8.GetBytes(
             Game1.uniqueIDForThisGame.ToString(CultureInfo.InvariantCulture)
         ));
@@ -446,6 +547,7 @@ public sealed class ModEntry : Mod
         if (this.config.UnlockAllForTesting)
             this.Monitor.Log("[测试] 已临时解锁全部移植能力；存档成长与剧情进度未被改写。", LogLevel.Info);
         this.protocolClient.Reconnect();
+        this.QueueObservationPublish(force: true);
     }
 
     private void OnSaving(object? sender, SavingEventArgs e)
@@ -460,25 +562,34 @@ public sealed class ModEntry : Mod
         this.growth.OnDayStarted(this.config.ShowCompanion);
         this.rescueAssist.OnDayStarted(sender, e);
         this.companionLife.OnDayStarted(sender, e);
+        this.QueueObservationPublish(force: true);
     }
 
     private void OnWarped(object? sender, WarpedEventArgs e)
     {
         if (!e.IsLocalPlayer) return;
+        this.projectileGroup.Cancel("玩家已切换地图。");
         this.flight.OnWarped(e.OldLocation, e.NewLocation);
         this.appearance.ReapplyOnNextUpdate();
         this.rescueAssist.OnWarped(sender, e);
         this.companionLife.OnWarped(sender, e);
+        this.QueueObservationPublish(force: true);
     }
 
     private void OnReturnedToTitle(object? sender, ReturnedToTitleEventArgs e)
     {
+        this.projectileGroup.Reset();
         this.client.SetSaveId(null);
         this.currentSaveId = null;
         this.gameAdapter.SetSaveId(null);
         this.protocolClient.Reconnect();
         this.textRequestInFlight = false;
         this.observationInFlight = false;
+        this.observationPublishPending = false;
+        this.observationPublishPendingForce = false;
+        this.observationInFlightFingerprint = null;
+        this.lastPublishedObservationFingerprint = null;
+        this.lastObservationPublishedAt = DateTimeOffset.MinValue;
         this.voiceKeyHeld = false;
         this.voiceStartTask = null;
         this.assistantStatus = null;
@@ -508,7 +619,8 @@ public sealed class ModEntry : Mod
                 this.mineCombatAssist.IsActive,
                 this.rescueAssist.IsActive),
             this.companionLife.GetSnapshot(),
-            this.abilities.Snapshot());
+            this.abilities.Snapshot(),
+            this.projectileGroup.CaptureLiveState());
     }
 
     private async Task ComposeCompanionTextAsync(CompanionCompositionRequest request)

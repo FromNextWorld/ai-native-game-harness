@@ -2,6 +2,8 @@ import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   access,
+  cp,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -16,6 +18,7 @@ import { promisify } from 'node:util'
 import extract from 'extract-zip'
 import type { ResolvedConfig } from '../config.js'
 import { compareStableVersions, steamRoots } from './stardew-valley.js'
+import { DST_PACKAGE_MANIFEST, dstLaunchOption, verifyDstPackage } from './dst-package.js'
 
 const execFileAsync = promisify(execFile)
 const GAME_FOLDER = "Don't Starve Together"
@@ -24,7 +27,7 @@ const LAUNCHER_NAME = 'ChesterAI.exe'
 const PACKAGED_INSTALLER_NAME = '安装切斯特AI.exe'
 const RELEASE_PREFIX = 'https://github.com/qimidandapigu/dsh-xiaotangyuan-game/releases/download/'
 const ASSET_PREFIX = 'dsh-xiaotangyuan-game-dont-starve-'
-const MAX_ARCHIVE_SIZE = 50 * 1024 * 1024
+const MAX_ARCHIVE_SIZE = 100 * 1024 * 1024
 
 export interface DontStarveArchiveSpec {
   name: string
@@ -48,6 +51,7 @@ export interface DontStarveDetection {
   modPath?: string
   installedVersion?: string
   launcherInstalled: boolean
+  runtime?: 'typescript-node' | 'legacy-python'
   steamLaunchOption?: string
 }
 
@@ -105,7 +109,9 @@ export async function inspectDontStarvePath(gamePath: string): Promise<DontStarv
   const modPath = join(modsPath, MOD_FOLDER)
   const installedVersion = await readInstalledVersion(modPath)
   const launcherPath = join(modPath, LAUNCHER_NAME)
-  const launcherInstalled = await exists(launcherPath)
+  const tsInstalled = await exists(join(modPath, DST_PACKAGE_MANIFEST))
+    && await exists(join(modPath, 'runtime', 'node.exe')) && await exists(join(modPath, 'runtime', 'cli.js'))
+  const launcherInstalled = tsInstalled || await exists(launcherPath)
   return {
     found: true,
     platform: process.platform,
@@ -113,8 +119,9 @@ export async function inspectDontStarvePath(gamePath: string): Promise<DontStarv
     modsPath,
     modPath,
     launcherInstalled,
+    ...(launcherInstalled ? { runtime: tsInstalled ? 'typescript-node' as const : 'legacy-python' as const } : {}),
     ...(installedVersion === undefined ? {} : { installedVersion }),
-    ...(launcherInstalled ? { steamLaunchOption: `"${launcherPath}" %command%` } : {}),
+    ...(launcherInstalled ? { steamLaunchOption: tsInstalled ? dstLaunchOption(resolved, modPath) : `"${launcherPath}" %command%` } : {}),
   }
 }
 
@@ -212,7 +219,7 @@ async function verifiedArchive(
 }
 
 function sanitizedAdapterEnv(text: string): string {
-  const allowed = /^(HARNESS_|DST_)[A-Z0-9_]*=/
+  const allowed = /^(HARNESS_GATEWAY_URL|DST_GAME_DIR)=/
   const lines = text.split(/\r?\n/).filter(line => allowed.test(line.trim()))
   return lines.length === 0 ? '' : `${lines.join('\n')}\n`
 }
@@ -243,14 +250,31 @@ export async function applyDontStarveInstaller(
   signal: AbortSignal,
   runner: DontStarveInstallerRunner = defaultRunner,
 ): Promise<DontStarveInstallResult> {
+  signal.throwIfAborted()
   const detection = await inspectDontStarvePath(gamePath)
   if (detection?.gamePath === undefined || detection.modsPath === undefined || detection.modPath === undefined) {
     throw new Error('指定目录不是有效的《饥荒联机版》安装目录')
   }
   const installerPath = join(installerRoot, PACKAGED_INSTALLER_NAME)
-  if (!(await exists(installerPath))) throw new Error(`饥荒安装包缺少 ${PACKAGED_INSTALLER_NAME}`)
+  const tsRoot = join(installerRoot, 'mod')
+  const tsPackage = await exists(join(tsRoot, DST_PACKAGE_MANIFEST))
+    ? await verifyDstPackage(tsRoot, version) : undefined
+  if (!tsPackage && !(await exists(installerPath))) throw new Error('饥荒安装包缺少 TS 运行时或旧版安装器')
+  if (detection.installedVersion && (compareStableVersions(detection.installedVersion, version) ?? 0) > 0) {
+    throw new Error('已安装更新版本的饥荒 Mod，不自动降级；请使用匹配的新安装包')
+  }
+  let sameTsBuild = false
+  if (tsPackage && detection.runtime === 'typescript-node') {
+    try {
+      const installed = await verifyDstPackage(detection.modPath, detection.installedVersion!, true)
+      const settings = await readFile(join(detection.modsPath, 'modsettings.lua'), 'utf8')
+      sameTsBuild = JSON.stringify(installed) === JSON.stringify(tsPackage)
+        && /^\s*ForceEnableMod\("dont-starve-ai-mod"\)\s*$/m.test(settings)
+    } catch { /* Repair incomplete or changed builds, even at the same semantic version. */ }
+  }
   if (detection.installedVersion !== undefined
     && detection.launcherInstalled
+    && (tsPackage ? sameTsBuild : detection.runtime === 'legacy-python')
     && (compareStableVersions(detection.installedVersion, version) ?? -1) >= 0) {
     return {
       installed: true,
@@ -260,13 +284,18 @@ export async function applyDontStarveInstaller(
       modPath: detection.modPath,
       action: 'kept',
       steamLaunchOption: detection.steamLaunchOption!,
-      components: 'DST Lua Mod + Harness Adapter launcher',
+      components: tsPackage ? 'DST Lua Mod + TypeScript Adapter + bundled Node' : 'DST Lua Mod + legacy Python launcher',
     }
   }
 
   safeChild(detection.gamePath, detection.modPath)
+  // Reject junctions before any backup or replacement, including a redirected mods folder.
+  for (const path of [detection.modsPath, detection.modPath]) {
+    if (await exists(path) && (await lstat(path)).isSymbolicLink()) throw new Error('游戏 Mod 目录是链接，请先确认真实安装目录')
+  }
   const backupRoot = join(detection.gamePath, '.xiaotangyuan-backups')
   safeChild(detection.gamePath, backupRoot)
+  if (await exists(backupRoot) && (await lstat(backupRoot)).isSymbolicLink()) throw new Error('备份目录是链接，已停止安装')
   await mkdir(backupRoot, { recursive: true })
   let previousEnv = ''
   try {
@@ -274,6 +303,10 @@ export async function applyDontStarveInstaller(
   } catch {
     // A previous installation may not have Adapter configuration.
   }
+  const settingsPath = join(detection.modsPath, 'modsettings.lua')
+  if (await exists(settingsPath) && (await lstat(settingsPath)).isSymbolicLink()) throw new Error('Mod 设置文件是链接，已停止安装')
+  const previousSettings = await exists(settingsPath) ? await readFile(settingsPath, 'utf8') : undefined
+  let settingsChanged = false
   let backupPath: string | undefined
   if (await exists(detection.modPath)) {
     const timestamp = new Date().toISOString().replaceAll(/[:.]/g, '-')
@@ -283,7 +316,25 @@ export async function applyDontStarveInstaller(
   }
 
   try {
-    await runner(installerPath, detection.gamePath, signal)
+    signal.throwIfAborted()
+    if (tsPackage) {
+      await cp(tsRoot, detection.modPath, { recursive: true, errorOnExist: true, force: false })
+      await verifyDstPackage(detection.modPath, version)
+      await execFileAsync(join(detection.modPath, 'runtime', 'node.exe'), [join(detection.modPath, 'runtime', 'cli.js'), '--game-dir', detection.gamePath, '--check'], {
+        signal, windowsHide: true, timeout: 15_000,
+        env: { SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR, TEMP: process.env.TEMP, TMP: process.env.TMP },
+      })
+      const option = dstLaunchOption(detection.gamePath, detection.modPath)
+      await writeFile(join(detection.modPath, 'Steam-Launch-Option.txt'), `${option}\n`, 'utf8')
+      const original = previousSettings ?? ''
+      // Game-local activation only; do not scan or mutate unrelated user worlds.
+      const enabled = /^\s*ForceEnableMod\("dont-starve-ai-mod"\)\s*$/m.test(original)
+      if (!enabled) {
+        settingsChanged = true
+        await writeFile(settingsPath, `${original}\nForceEnableMod("dont-starve-ai-mod")\nDisableLocalModWarning()\n`, 'utf8')
+      }
+    } else await runner(installerPath, detection.gamePath, signal)
+    signal.throwIfAborted()
     const installed = await inspectDontStarvePath(detection.gamePath)
     if (installed?.installedVersion !== version || !installed.launcherInstalled || installed.modPath === undefined) {
       throw new Error(`饥荒 Mod 安装后验证失败，期望版本 ${version}`)
@@ -298,13 +349,53 @@ export async function applyDontStarveInstaller(
       action: backupPath === undefined ? 'installed' : 'updated',
       ...(backupPath === undefined ? {} : { backupPath }),
       steamLaunchOption: installed.steamLaunchOption!,
-      components: 'DST Lua Mod + Harness Adapter launcher',
+      components: tsPackage ? 'DST Lua Mod + TypeScript Adapter + bundled Node' : 'DST Lua Mod + legacy Python launcher',
     }
   } catch (error) {
+    if (settingsChanged) {
+      if (previousSettings === undefined) await rm(settingsPath, { force: true })
+      else await writeFile(settingsPath, previousSettings, 'utf8')
+    }
     await rm(detection.modPath, { recursive: true, force: true })
     if (backupPath !== undefined && await exists(backupPath)) await rename(backupPath, detection.modPath)
     throw error
   }
+}
+
+/** extract-zip's legacy streams can stall on Node 26. Windows uses bounded .NET extraction. */
+async function extractDstArchive(archivePath: string, destination: string, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted()
+  if (process.platform !== 'win32') {
+    await extract(archivePath, { dir: destination })
+    return
+  }
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$root = [IO.Path]::GetFullPath($env:AGH_EXTRACT_DEST) + [IO.Path]::DirectorySeparatorChar
+$zip = [IO.Compression.ZipFile]::OpenRead($env:AGH_EXTRACT_ZIP)
+try {
+  if ($zip.Entries.Count -gt 600) { throw 'Too many archive entries' }
+  $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  [long]$size = 0
+  foreach ($entry in $zip.Entries) {
+    $name = $entry.FullName.Replace('\\', '/')
+    if ($name -match '(^/|:|(^|/)\\.\\.?(/|$))' -or (($entry.ExternalAttributes -shr 16) -band 61440) -eq 40960) { throw 'Unsafe archive path or link' }
+    $target = [IO.Path]::GetFullPath([IO.Path]::Combine($root, $name))
+    if (-not $target.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or -not $seen.Add($target)) { throw 'Unsafe or duplicate archive path' }
+    $size += $entry.Length
+    if ($size -gt 268435456) { throw 'Unpacked archive too large' }
+  }
+} finally { $zip.Dispose() }
+[IO.Compression.ZipFile]::ExtractToDirectory($env:AGH_EXTRACT_ZIP, $env:AGH_EXTRACT_DEST)
+`
+  await execFileAsync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoProfile', '-NonInteractive', '-Command', script], {
+      signal, timeout: 60_000, windowsHide: true,
+      env: { SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR, TEMP: process.env.TEMP, TMP: process.env.TMP,
+        AGH_EXTRACT_ZIP: archivePath, AGH_EXTRACT_DEST: destination },
+    })
+  signal.throwIfAborted()
 }
 
 export async function installDontStarveMod(
@@ -323,7 +414,7 @@ export async function installDontStarveMod(
     const extractedPath = join(tempRoot, 'package')
     await writeFile(archivePath, archive.bytes)
     await mkdir(extractedPath)
-    await extract(archivePath, { dir: extractedPath })
+    await extractDstArchive(archivePath, extractedPath, signal)
     return await applyDontStarveInstaller(detection.gamePath, extractedPath, archive.version, signal)
   } finally {
     await rm(tempRoot, { recursive: true, force: true })

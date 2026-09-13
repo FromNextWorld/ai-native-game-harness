@@ -5,6 +5,8 @@ using System.Net.WebSockets;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Linq;
+using StardewAgentMod.Game.Combat;
 
 namespace StardewAgentMod;
 
@@ -18,6 +20,7 @@ internal sealed class GameAgentClient : IAsyncDisposable
     private CancellationTokenSource? connectionLifetime;
     private string? saveId;
     private long nextRequestId;
+    private readonly Func<string, JsonElement, CancellationToken, Task<object>>? atomExecutor;
 
     public event Action<string, string>? AssistantPresented;
     public event Action<string>? AssistantStreaming;
@@ -27,9 +30,11 @@ internal sealed class GameAgentClient : IAsyncDisposable
     public event Action? AssistantSpeechFinished;
     public event Action<string>? AssistantFailed;
     public event Action<string>? AdapterProtocolEndpointDiscovered;
+    public event Action? TransportClosed;
 
-    public GameAgentClient(string gatewayUrl)
+    public GameAgentClient(string gatewayUrl, Func<string, JsonElement, CancellationToken, Task<object>>? atomExecutor = null)
     {
+        this.atomExecutor = atomExecutor;
         this.gatewayUri = new Uri(gatewayUrl, UriKind.Absolute);
         if (this.gatewayUri.Scheme is not "ws" and not "wss")
             throw new ArgumentException("GatewayUrl must use ws:// or wss://.", nameof(gatewayUrl));
@@ -149,7 +154,9 @@ internal sealed class GameAgentClient : IAsyncDisposable
                     gameId = "stardew-valley",
                     version = "0.8.2",
                     protocolVersion = "1.1",
-                    capabilities = new[] { "assistant.text-stream", "assistant.speech-sync" },
+                    capabilities = this.atomExecutor == null ? new[] { "assistant.text-stream", "assistant.speech-sync" }
+                        : new[] { "assistant.text-stream", "assistant.speech-sync" }.Concat(ProjectileGroup.AtomNames).ToArray(),
+                    atoms = this.atomExecutor == null ? Array.Empty<object>() : ProjectileGroup.AtomDefinitions,
                     processId = Environment.ProcessId,
                     saveId = this.saveId
                 },
@@ -251,6 +258,14 @@ internal sealed class GameAgentClient : IAsyncDisposable
 
                 JsonDocument document = JsonDocument.Parse(message.ToArray());
                 JsonElement root = document.RootElement;
+                if (root.TryGetProperty("method", out var incomingMethod) && incomingMethod.GetString() == "game.atom.execute")
+                {
+                    // Native actions are dispatched on SMAPI's main thread. They are short,
+                    // so handling one here cannot block a long-running animation/status loop.
+                    try { await this.HandleAtomAsync(root, activeSocket, cancellationToken).ConfigureAwait(false); }
+                    finally { document.Dispose(); }
+                    continue;
+                }
                 if (root.TryGetProperty("id", out JsonElement responseId)
                     && responseId.ValueKind == JsonValueKind.Number
                     && responseId.TryGetInt64(out long id)
@@ -267,8 +282,15 @@ internal sealed class GameAgentClient : IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception ex)
         {
-            this.FailPending(ex);
-            this.AssistantFailed?.Invoke($"与 Harness 的连接中断：{ex.Message}");
+            if (ReferenceEquals(activeSocket, this.socket))
+            {
+                this.FailPending(ex);
+                this.AssistantFailed?.Invoke($"与 Harness 的连接中断：{ex.Message}");
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(activeSocket, this.socket)) this.TransportClosed?.Invoke();
         }
     }
 
@@ -300,6 +322,16 @@ internal sealed class GameAgentClient : IAsyncDisposable
                     this.AssistantPresented?.Invoke(text.GetString() ?? "", source);
                 }
                 break;
+            case "assistant.action.result":
+                // Actions run after the spoken reply. Their actual outcome must
+                // replace the promise bubble, including preflight failures.
+                if (parameters.TryGetProperty("text", out var actionText) && actionText.ValueKind == JsonValueKind.String
+                    && parameters.TryGetProperty("success", out var actionSuccess)
+                    && actionSuccess.ValueKind is JsonValueKind.True or JsonValueKind.False) {
+                    string resultText = actionText.GetString() ?? "";
+                    if (!string.IsNullOrWhiteSpace(resultText)) this.AssistantPresented?.Invoke(resultText, "action-result");
+                }
+                break;
             case "assistant.status":
                 string status = parameters.TryGetProperty("status", out JsonElement statusValue)
                     ? statusValue.GetString() ?? "" : "";
@@ -323,6 +355,25 @@ internal sealed class GameAgentClient : IAsyncDisposable
                 this.AssistantFailed?.Invoke(message);
                 break;
         }
+    }
+
+    private async Task HandleAtomAsync(JsonElement root, ClientWebSocket activeSocket, CancellationToken cancellationToken)
+    {
+        if (!root.TryGetProperty("id", out var requestId)) return;
+        object response;
+        try
+        {
+            var parameters = root.GetProperty("params");
+            string atom = parameters.GetProperty("atom").GetString() ?? "";
+            if (this.atomExecutor == null || !ProjectileGroup.AtomNames.Contains(atom)) throw new InvalidOperationException("未声明的原子能力。");
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(TimeSpan.FromSeconds(3));
+            object result = await this.atomExecutor(atom, parameters.GetProperty("arguments").Clone(), deadline.Token).WaitAsync(deadline.Token).ConfigureAwait(false);
+            response = new { jsonrpc = "2.0", id = requestId.Clone(), result };
+        }
+        catch (Exception ex) { response = new { jsonrpc = "2.0", id = requestId.Clone(), error = new { code = -32000, message = ex.Message } }; }
+        if (!ReferenceEquals(activeSocket, this.socket) || cancellationToken.IsCancellationRequested) return;
+        await this.SendPayloadAsync(response, cancellationToken).ConfigureAwait(false);
     }
 
     private static bool TryReadLoopbackWebSocketUrl(
@@ -354,6 +405,7 @@ internal sealed class GameAgentClient : IAsyncDisposable
 
     private void ResetConnection()
     {
+        if (this.socket != null) this.TransportClosed?.Invoke();
         this.connectionLifetime?.Cancel();
         this.connectionLifetime?.Dispose();
         this.connectionLifetime = null;

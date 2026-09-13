@@ -1,5 +1,10 @@
+param([switch]$LegacyPython)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$repoRoot = Split-Path -Parent (Split-Path -Parent $projectRoot)
+pnpm --dir (Join-Path $repoRoot 'plugins/xiaotangyuan-game') run check
+if ($LASTEXITCODE -ne 0) { throw 'DST TypeScript checks failed' }
+if (-not $LegacyPython) { return }
 $localPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
 
 if (Test-Path -LiteralPath $localPython -PathType Leaf) {

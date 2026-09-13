@@ -52,6 +52,8 @@ export interface SkillSourceTryStatement {
 
 export type SkillSourceStatement =
   | SkillSourceCallStatement
+  | { kind: 'skill', skillId: string, version: number, args: Record<string, SkillExpression>, saveAs?: string }
+  | { kind: 'return', value: SkillExpression }
   | SkillSourceIfStatement
   | SkillSourceRepeatStatement
   | SkillSourceTryStatement
@@ -67,6 +69,21 @@ export interface SkillProgramV2 {
 
 export type SkillProgram = SkillProgramV1 | SkillProgramV2
 
+/** Frozen by the task owner, never supplied by generated skill source. */
+export interface SkillAcceptance {
+  version: 1
+  steps: Array<{
+    atom: string
+    arguments?: Record<string, SkillValue>
+    equals?: Record<string, SkillValue>
+    positive?: string[]
+    nonEmpty?: string[]
+    bindings?: Record<string, { step: number, field: string }>
+    resultBindings?: Record<string, { step: number, field: string }>
+    allowedItems?: Record<string, SkillValue[]>
+  }>
+}
+
 export interface SkillRecord {
   id: string
   gameId: string
@@ -76,6 +93,8 @@ export interface SkillRecord {
   version: number
   status: 'active' | 'archived'
   program: SkillProgram
+  verified?: boolean
+  acceptance?: SkillAcceptance
   createdAt: string
   updatedAt: string
   lastUsedAt?: string
@@ -91,7 +110,11 @@ export interface SkillStepTrace {
   success: boolean
   result?: unknown
   error?: string
+  callPath?: string[]
 }
+
+/** Observed pipeline stage, not an inference from a model message or empty trace. */
+export type SkillFailureStage = 'compile' | 'preflight' | 'execution' | 'verification' | 'cancelled'
 
 export interface SkillRunResult {
   success: boolean
@@ -99,6 +122,8 @@ export interface SkillRunResult {
   skillVersion: number
   trace: SkillStepTrace[]
   error?: string
+  value?: SkillValue
+  failureStage?: SkillFailureStage
 }
 
 export interface SkillLearningAttempt {
@@ -109,6 +134,7 @@ export interface SkillLearningAttempt {
   success: boolean
   trace: SkillStepTrace[]
   error?: string
+  failureStage?: SkillFailureStage
   createdAt: string
 }
 

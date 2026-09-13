@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <GameManagedDir Condition="'$(GameManagedDir)' == ''">C:\steam\steamapps\common\OxygenNotIncluded\OxygenNotIncluded_Data\Managed</GameManagedDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\src\Skills\FairyWaterSkillSystem.cs" Link="FairyWaterSkillSystem.cs" />
+    <Compile Include="..\src\Skills\FairyWaterSkillState.cs" Link="FairyWaterSkillState.cs" />
+    <Compile Include="..\src\Skills\WaterTransferFeedback.cs" Link="WaterTransferFeedback.cs" />
+    <Compile Include="..\src\Commands\PlayerCommandModels.cs" Link="PlayerCommandModels.cs" />
+    <Compile Include="..\src\Harness\OniHarnessBridge.cs" Link="OniHarnessBridge.cs" />
+    <!-- SDK ships the .NET-compatible Json.NET; keep this offline test runner dependency-free. -->
+    <Reference Include="Newtonsoft.Json" HintPath="$(MSBuildToolsPath)\Newtonsoft.Json.dll" />
+  </ItemGroup>
+</Project>

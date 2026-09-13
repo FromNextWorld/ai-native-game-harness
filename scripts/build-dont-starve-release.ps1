@@ -3,21 +3,6 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $projectRoot = Join-Path $repositoryRoot 'games\dont-starve-together'
 $buildScript = Join-Path $projectRoot 'scripts\build-player-package.ps1'
 $manifestPath = Join-Path $repositoryRoot 'distribution\dont-starve-together-v1.json'
-$venvPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
-
-if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
-    $pythonLauncher = (Get-Command py -ErrorAction Stop).Source
-    & $pythonLauncher -3 -m venv (Join-Path $projectRoot '.venv')
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Could not create the Don''t Starve virtual environment.'
-    }
-}
-
-& $venvPython -m pip install --disable-pip-version-check -e $projectRoot
-if ($LASTEXITCODE -ne 0) {
-    throw 'Could not install Don''t Starve build dependencies.'
-}
-
 & $buildScript
 if ($LASTEXITCODE -ne 0) {
     throw 'Don''t Starve player package build failed.'

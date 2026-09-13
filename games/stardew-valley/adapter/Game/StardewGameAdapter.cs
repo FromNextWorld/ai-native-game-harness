@@ -4,6 +4,8 @@ using System.Text.Json;
 using StardewAgentMod.Game.Abilities;
 using StardewAgentMod.Game.Actions;
 using StardewAgentMod.Game.Companion;
+using StardewAgentMod.Game.Combat;
+using System.Linq;
 using StardewAgentMod.Game.Flight;
 using StardewAgentMod.Harness;
 using StardewModdingAPI;
@@ -29,6 +31,7 @@ internal sealed class StardewGameAdapter : IAdapterProtocolHandler
     private readonly MineCombatAssist mineCombat;
     private readonly RescueAssist rescue;
     private readonly StardewActionModule actions;
+    private readonly ProjectileGroup projectiles;
     private readonly Dictionary<string, object> completed = new(StringComparer.Ordinal);
     private readonly Queue<string> completedOrder = new();
 
@@ -43,7 +46,8 @@ internal sealed class StardewGameAdapter : IAdapterProtocolHandler
         FlightController flight,
         MineCombatAssist mineCombat,
         RescueAssist rescue,
-        StardewActionModule actions)
+        StardewActionModule actions,
+        ProjectileGroup projectiles)
     {
         this.growth = growth;
         this.abilities = abilities;
@@ -53,6 +57,7 @@ internal sealed class StardewGameAdapter : IAdapterProtocolHandler
         this.mineCombat = mineCombat;
         this.rescue = rescue;
         this.actions = actions;
+        this.projectiles = projectiles;
     }
 
     public void SetSaveId(string? value)
@@ -72,7 +77,10 @@ internal sealed class StardewGameAdapter : IAdapterProtocolHandler
             gameId = GameId,
             displayName = "Stardew Valley / 星露谷物语",
             adapterVersion = AdapterVersion,
-            capabilities = Capabilities,
+            capabilities = Capabilities.Concat(ProjectileGroup.AtomNames.Select(name => new {
+                name, kind = "action", description = "有时限的投射物原子能力，详见游戏聊天通道原子目录。万剑归宗编排由 TS 执行。",
+                inputSchema = ProjectileGroup.InputSchema(name),
+            })),
         };
     }
 
@@ -89,7 +97,8 @@ internal sealed class StardewGameAdapter : IAdapterProtocolHandler
                     this.mineCombat.IsActive,
                     this.rescue.IsActive),
                 this.companionLife.GetSnapshot(),
-                this.abilities.Snapshot())
+                this.abilities.Snapshot(),
+                this.projectiles.CaptureLiveState())
             : new
             {
                 schema = "ai-native.game-context.v1",
@@ -133,8 +142,25 @@ internal sealed class StardewGameAdapter : IAdapterProtocolHandler
         if (argumentsElement.ValueKind != JsonValueKind.Object)
             return this.Cache(requestId, Failure(requestId, this.revision, "INVALID_ARGUMENTS", "Action arguments must be an object."));
 
+        if (ProjectileGroup.AtomNames.Contains(capability))
+        {
+            try {
+                object receipt = this.projectiles.Execute(capability, argumentsElement);
+                if (capability != ProjectileGroup.Prefix + "status") this.revision++;
+                // Do not cache a mutable receipt: a duplicate launch response must not become a later success.
+                return this.Cache(requestId, JsonSerializer.SerializeToElement(new { requestId, ok = true, revision = this.revision, result = receipt }));
+            }
+            catch (Exception ex) { return this.Cache(requestId, Failure(requestId, this.revision, "PROJECTILE_REJECTED", ex.Message)); }
+        }
+
         IReadOnlyDictionary<string, object?> arguments = JsonSerializer.Deserialize<Dictionary<string, object?>>(argumentsElement.GetRawText())
             ?? new Dictionary<string, object?>();
+        if (capability == "stardew.inspect_planning")
+        {
+            if (!Context.IsWorldReady) return this.Cache(requestId, Failure(requestId, this.revision, "WORLD_NOT_READY", "请先进入存档。"));
+            try { return this.Cache(requestId, new { requestId, ok = true, revision = this.revision, result = PlanningEvidence.Capture(arguments) }); }
+            catch (Exception ex) { return this.Cache(requestId, Failure(requestId, this.revision, "INSPECTION_FAILED", ex.Message)); }
+        }
         GameActionOutcome outcome = this.actions.Execute(capability, arguments);
         if (outcome.Ok && outcome.ChangedState) this.revision++;
 
@@ -210,9 +236,13 @@ internal sealed class StardewGameAdapter : IAdapterProtocolHandler
     private static readonly object[] Capabilities =
     {
         Observation("game.state", "当前星露谷存档、玩家、农场、同伴与 UI 的权威观察。"),
+        new { name = "stardew.inspect_planning", kind = "action", description = "只读查询存档事实：npc 查角色位置，route 同时查地图出口，inventory 查背包、献祭进度和交物任务，day 查身体状态、任务、明日天气和工具升级。不得把条件路线当成已验通路线，不自动出售。", inputSchema = new {
+            type = "object", additionalProperties = false, required = new[] { "kind" }, properties = new Dictionary<string, object> {
+                ["kind"] = new { type = "string", @enum = new[] { "npc", "route", "inventory", "day" } }, ["npc"] = new { type = "string" },
+            } } },
         Action(StardewCapabilities.PlantSeedsAll, "把玩家当前选中的种子播到当前地图可用农田；遵守游戏可种植规则。"),
-        Action(StardewCapabilities.WaterAll, "浇灌当前地图全部干燥耕地与室内花盆。"),
-        Action(StardewCapabilities.HarvestAll, "收获当前地图全部成熟作物，并按背包、箱子、地面顺序安全收纳。"),
+        Action(StardewCapabilities.WaterAll, "浇灌指定矩形区域干燥耕地与花盆。指定区域必须传 location/x/y/width/height；只有玩家明确要求整个地图时才传空参数。区域不明确先询问，禁止猜坐标。"),
+        Action(StardewCapabilities.HarvestAll, "收获指定矩形区域成熟作物，保留未成熟作物。指定区域必须传 location/x/y/width/height；只有玩家明确要求整个地图时才传空参数。区域不明确先询问，禁止猜坐标。"),
         Action(StardewCapabilities.SpeedGrow, "把当前地图未成熟作物推进到睡一夜后可收获，并补水。"),
         Action(StardewCapabilities.ClearDebris, "清理玩家周围八格的农场天然杂物；保护作物、设施、果树、茶树和装有树液采集器的树。"),
         Action(StardewCapabilities.FlightTakeoff, "在允许的室外主地图让玩家乘小汤圆起飞。"),
@@ -234,7 +264,20 @@ internal sealed class StardewGameAdapter : IAdapterProtocolHandler
         name,
         kind = "action",
         description,
-        inputSchema = EmptyInputSchema,
+        inputSchema = name is StardewCapabilities.WaterAll or StardewCapabilities.HarvestAll ? FieldInputSchema : EmptyInputSchema,
+    };
+
+    private static object FieldInputSchema => new
+    {
+        type = "object", additionalProperties = false,
+        properties = new Dictionary<string, object>
+        {
+            ["location"] = new { type = "string", description = "当前观察中的地图唯一名称" },
+            ["x"] = new { type = "integer", minimum = 0, maximum = 10000 },
+            ["y"] = new { type = "integer", minimum = 0, maximum = 10000 },
+            ["width"] = new { type = "integer", minimum = 1, maximum = 64 },
+            ["height"] = new { type = "integer", minimum = 1, maximum = 64 },
+        },
     };
 }
 

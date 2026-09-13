@@ -1,4 +1,5 @@
 import { createServer } from 'node:net'
+import { pluginFingerprint, contentAddressedArchive } from './plugin-fingerprint.mjs'
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -11,6 +12,9 @@ import { DshProductRuntime } from './dsh-product-runtime.mjs'
 import { buildDiagnosticBundle, diagnosticFilename } from './diagnostics.mjs'
 import { EVALUATION_CATALOG, runDstButterflyProductEvaluation } from './evaluation-runtime.mjs'
 import { startDesktopUpdater } from './updater.mjs'
+import { createRuntimeRecovery } from './runtime-recovery.mjs'
+import { bundledDstEnvironment } from './dst-installer.mjs'
+import { stageGameUiPlugin } from './game-ui-staging.mjs'
 
 const require = createRequire(import.meta.url)
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -39,6 +43,50 @@ let evaluationRunning = false
 let desktopUpdater
 
 const PRODUCT_TITLE = 'AI Native Game Harness 游戏版'
+
+const runtimeRecovery = createRuntimeRecovery({
+  isStopping: () => quitting,
+  restart: async () => {
+    await clearDshProductRuntime()
+    await stopDshRuntime()
+    if (quitting) return
+    try {
+      await startRuntime()
+    } catch (error) {
+      await clearDshProductRuntime()
+      await stopDshRuntime()
+      throw error
+    }
+  },
+  onRetry: (attempt, delay, error) => {
+    appendRuntimeLog(`[desktop] Runtime recovery attempt=${attempt} delayMs=${delay}: ${String(error)}\n`)
+    runtimeWebUrl = undefined
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      void mainWindow.loadFile(join(desktopRoot, 'src', 'status.html')).then(() => {
+        sendStatus('正在恢复语音和聊天服务', `服务意外停止，正在第 ${attempt} 次自动重连…`)
+      }).catch(error => appendRuntimeLog(`[desktop] recovery status page: ${String(error)}\n`))
+    }
+  },
+  onExhausted: error => {
+    appendRuntimeLog(`[desktop] Runtime recovery exhausted: ${String(error)}\n`)
+    sendStatus('语音和聊天服务暂时不可用', '自动恢复未成功，请重新打开应用。已保存诊断日志。')
+  },
+  onError: error => appendRuntimeLog(`[desktop] Runtime recovery failed: ${String(error)}\n`),
+})
+
+async function clearDshProductRuntime() {
+  dshProductUnsubscribe?.()
+  dshProductUnsubscribe = undefined
+  const runtime = dshProductRuntime
+  dshProductRuntime = undefined
+  runtimeWebUrl = undefined
+  lastDshCoreSnapshot = undefined
+  lastDshLearningSnapshot = undefined
+  lastDshStorySnapshot = undefined
+  pendingDshDiagnostics.length = 0
+  collectProductRecords.buffer = ''
+  await runtime?.close()
+}
 
 async function installGamePageEntry() {
   if (!mainWindow || mainWindow.isDestroyed()) return
@@ -78,33 +126,9 @@ async function installGamePageEntry() {
       window.__aiNativeBrandObserver = new MutationObserver(() => requestAnimationFrame(applyProductBranding))
       window.__aiNativeBrandObserver.observe(document.documentElement, { childList: true, subtree: true })
     }
-    if (document.getElementById('ai-native-game-page-entry')) return
-    const makeEntry = ({ id, text, title, bottom, href, accent }) => {
-      const button = document.createElement('button')
-      button.id = id
-      button.type = 'button'
-      button.textContent = text
-      button.title = title
-      Object.assign(button.style, {
-        position: 'fixed', right: '18px', bottom, zIndex: '2147483647',
-        border: '1px solid rgba(255,255,255,.18)', borderRadius: '12px',
-        padding: '10px 14px', background: accent, color: '#d8fff5',
-        boxShadow: '0 10px 30px rgba(0,0,0,.28)', cursor: 'pointer',
-        font: '600 13px system-ui, sans-serif'
-      })
-      button.addEventListener('click', () => { window.location.href = href })
-      document.body.append(button)
-    }
-    makeEntry({
-      id: 'ai-native-evaluation-entry', text: '✓ 自动测评',
-      title: '进入 Harness 自动测评（Ctrl+3）', bottom: '66px',
-      href: 'ai-native-game-harness://evaluation', accent: '#28512f'
-    })
-    makeEntry({
-      id: 'ai-native-game-page-entry', text: '🎮 进入游戏版',
-      title: '进入 AI Native Game Harness 游戏版（Ctrl+2）', bottom: '18px',
-      href: 'ai-native-game-harness://game', accent: '#123a3a'
-    })
+    // Navigation lives in native Settings sections and the Desktop menu.
+    document.getElementById('ai-native-game-page-entry')?.remove()
+    document.getElementById('ai-native-evaluation-entry')?.remove()
   })()`)
 }
 
@@ -140,7 +164,7 @@ function installApplicationMenu() {
     ] },
     { label: '页面', submenu: [
       { label: '原 Harness 页面', accelerator: 'CmdOrCtrl+1', click: () => navigate(showHarnessPage) },
-      { label: '游戏版页面', accelerator: 'CmdOrCtrl+2', click: () => navigate(showGamePage) },
+      { label: '游戏', accelerator: 'CmdOrCtrl+2', click: () => navigate(showGamePage) },
       { label: '自动测评', accelerator: 'CmdOrCtrl+3', click: () => navigate(() => showGamePage('evaluation')) },
     ] },
     { label: '视图', submenu: [
@@ -209,9 +233,7 @@ function runtimePaths() {
   const dshBin = join(dirname(dshPackage), 'lib', 'bin.js')
   const oniVersion = JSON.parse(readFileSync(oniPackage, 'utf8')).version
 
-  const fingerprint = (path, version) => packaged
-    ? version
-    : `${version}:${createHash('sha256').update(readFileSync(path)).digest('hex')}`
+  const fingerprint = pluginFingerprint
   const pluginPath = join(pluginRoot, pluginArchive)
   const workPluginPath = join(pluginRoot, workArchive)
   const oniPath = oniArchive ? join(pluginRoot, oniArchive) : undefined
@@ -247,8 +269,13 @@ function runtimePaths() {
 
 function childEnvironment(paths) {
   const disableHmr = app.isPackaged ? '1' : process.env.DSH_DISABLE_HMR
+  const dstRoot = app.isPackaged
+    ? join(process.resourcesPath, 'game-installers', 'dont-starve-together')
+    : join(repoRoot, '.artifacts', 'dst-package')
+  const dstEnv = bundledDstEnvironment(dstRoot, { required: app.isPackaged })
   return {
     ...process.env,
+    ...dstEnv,
     DSH_HOME: join(app.getPath('userData'), 'dsh-home'),
     ...(disableHmr === undefined ? {} : { DSH_DISABLE_HMR: disableHmr }),
   }
@@ -294,6 +321,12 @@ function runDshOnce(args, paths) {
 }
 
 async function ensurePlugin(paths) {
+  const archiveCache = join(app.getPath('userData'), 'runtime-state', 'plugin-archives')
+  paths = { ...paths,
+    pluginPath: contentAddressedArchive(paths.pluginPath, archiveCache),
+    workPluginPath: contentAddressedArchive(paths.workPluginPath, archiveCache),
+    ...(paths.oniPath ? { oniPath: contentAddressedArchive(paths.oniPath, archiveCache) } : {}),
+  }
   const stateRoot = join(app.getPath('userData'), 'runtime-state')
   const markerPath = join(stateRoot, 'xiaotangyuan.version')
   const expectedVersion = `${paths.pluginFingerprint};work=${paths.workPluginFingerprint};oni=${paths.oniFingerprint}`
@@ -412,6 +445,7 @@ function writeProductPatch(paths, adapterPort) {
   const storyDataRoot = yamlString(join(app.getPath('userData'), 'story'))
   const gamePackRoot = yamlString(join(app.getPath('userData'), 'game-packs'))
   writeFileSync(productPatchPath, `- id: xiaotangyuan-game\n  config:\n    adapterProtocolUrl: 'ws://127.0.0.1:${adapterPort}/adapter'\n    media:\n      enabled: true\n      pushToTalkVirtualKey: 86\n- id: xiaotangyuan-oni-adapter\n  config:\n    adapterProtocolUrl: 'ws://127.0.0.1:${adapterPort}/adapter'\n- insert:\n    - id: ai-native-game-core-product\n      name: '${coreUrl}'\n      config:\n        productSnapshotOutput: true\n    - id: ai-native-game-transport-product\n      name: '${transportUrl}'\n      config:\n        enabled: true\n        host: 127.0.0.1\n        port: ${adapterPort}\n        path: /adapter\n        requestTimeoutMs: 10000\n    - id: ai-native-game-learning-product\n      name: '${learningUrl}'\n    - id: ai-native-game-story-product\n      name: '${storyUrl}'\n      config:\n        dataRoot: '${storyDataRoot}'\n        gamePackRoot: '${gamePackRoot}'\n        productSnapshotOutput: true\n`)
+  appendFileSync(productPatchPath, stageGameUiPlugin(join(desktopRoot, 'src', 'game-ui-plugin'), app.getPath('userData')))
   return productPatchPath
 }
 
@@ -448,12 +482,14 @@ function collectProductRecords(data) {
 }
 
 async function startRuntime() {
+  if (quitting) return
   sendStatus('正在检查本地运行环境', '读取插件包和版本信息…')
   appendRuntimeLog('[desktop] resolving Runtime paths\n')
   const paths = runtimePaths()
   appendRuntimeLog(`[desktop] Runtime paths ready: work=${paths.workPluginVersion}; plugin=${paths.pluginVersion}; oni=${paths.oniVersion}\n`)
   sendStatus('正在检查内置游戏插件', `Work ${paths.workPluginVersion} / 小汤圆 ${paths.pluginVersion} / 缺氧 Adapter ${paths.oniVersion}`)
   await ensurePlugin(paths)
+  if (quitting) return
   appendRuntimeLog('[desktop] built-in plugins ready\n')
   sendStatus('正在分配本地端口', '准备 AI Runtime 和游戏 Adapter 通道…')
   const port = await getFreePort()
@@ -466,6 +502,7 @@ async function startRuntime() {
 
   dshExitCode = null
   dshExited = false
+  if (quitting) return
   dshProcess = forkDsh([
     'web',
     '--patch', paths.patchPath,
@@ -490,10 +527,7 @@ async function startRuntime() {
   dshProcess.once('exit', (code) => {
     dshExitCode = code
     dshExited = true
-    if (!quitting && startupComplete && mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.loadFile(join(desktopRoot, 'src', 'status.html'))
-      sendStatus('AI Runtime 已停止', recentLog || `退出代码 ${code}`)
-    }
+    if (!quitting && startupComplete) runtimeRecovery.failed(new Error(`AI Runtime 意外退出，代码 ${code}`))
   })
 
   try {
@@ -515,12 +549,14 @@ async function startRuntime() {
   if (lastDshLearningSnapshot) dshProductRuntime.attachLearningSnapshot(lastDshLearningSnapshot)
   if (lastDshStorySnapshot) dshProductRuntime.attachStorySnapshot(lastDshStorySnapshot)
   await dshProductRuntime.start()
+  if (quitting || dshExited) throw new Error('AI Runtime 在产品服务启动期间退出')
   appendRuntimeLog('[desktop] DSH product bridge ready\n')
   for (const record of pendingDshDiagnostics.splice(0)) dshProductRuntime.attachDiagnosticRecord(record)
   dshProductUnsubscribe = dshProductRuntime.subscribe((snapshot) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('platform-snapshot', snapshot)
   })
   startupComplete = true
+  runtimeRecovery.ready()
   await showHarnessPage()
 }
 
@@ -727,6 +763,13 @@ function createWindow() {
     ? mainWindow.loadFile(join(desktopRoot, 'src', 'status.html')).then(() => startRuntime())
     : startPlatformRuntime()
   void start.catch(async (error) => {
+    if (quitting) return
+    if (dshRuntime) {
+      await clearDshProductRuntime()
+      await stopDshRuntime()
+      runtimeRecovery.failed(error)
+      return
+    }
     sendStatus('启动失败', error instanceof Error ? error.message : String(error))
     await dialog.showMessageBox(mainWindow, {
       type: 'error',
@@ -768,6 +811,7 @@ if (!hasSingleInstanceLock) {
     event.preventDefault()
     if (quitting) return
     quitting = true
+    runtimeRecovery.stop()
     void (async () => {
       if (demoAdapterProcess?.pid) demoAdapterProcess.kill()
       platformUnsubscribe?.()

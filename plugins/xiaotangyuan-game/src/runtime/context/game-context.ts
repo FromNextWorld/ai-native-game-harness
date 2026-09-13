@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { AdapterHello } from '../../protocol/game.js'
+import { projectileStateForPrompt } from './projectile-live-state.js'
 
 export const AI_NATIVE_GAME_CONTEXT_SCHEMA = 'ai-native.game-context.v1'
 
@@ -263,6 +264,8 @@ export function renderGameContextForPrompt(observation: unknown, adapter?: Adapt
   if (observation === undefined) return undefined
   const normalized = normalizeGameContext(observation, adapter, now)
   let value = normalized.value
+  const companion = asObject(value.companion)
+  if (companion?.projectiles != null) value = { ...value, companion: { ...companion, projectiles: projectileStateForPrompt(companion.projectiles, now.getTime()) } }
   const meta = asObject(value.meta) ?? {}
   const observedAt = Date.parse(asString(meta.capturedAt) ?? '')
   const ageMs = Number.isFinite(observedAt) ? Math.max(0, now.getTime() - observedAt) : 0

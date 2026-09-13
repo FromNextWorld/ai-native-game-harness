@@ -22,6 +22,7 @@ export interface ProductLearningSnapshot {
     memory: boolean
     skills: boolean
   }
+  memoryStatus?: MemoryService['status']
   activeGameId?: string
   memories: ReturnType<MemoryService['store']['listAllGameMemory']>
   playStatistics: ReturnType<MemoryService['store']['listPlayStatistics']>
@@ -50,16 +51,20 @@ export class XiaoTangYuanLearningService extends Service {
   }
 
   snapshot(activeGameId?: string): ProductLearningSnapshot {
+    const memorySnapshot = this.memory?.optionalRead(store => ({
+      memories: store.listAllGameMemory(), playStatistics: store.listPlayStatistics(),
+    }))
     return {
       schemaVersion: 1,
       updatedAt: new Date().toISOString(),
       enabled: {
-        memory: this.memory !== undefined,
+        memory: this.memory?.available === true,
         skills: this.skills !== undefined,
       },
+      ...(this.memory === undefined ? {} : { memoryStatus: this.memory.status }),
       ...(activeGameId === undefined ? {} : { activeGameId }),
-      memories: this.memory?.store.listAllGameMemory() ?? [],
-      playStatistics: this.memory?.store.listPlayStatistics() ?? [],
+      memories: memorySnapshot?.memories ?? [],
+      playStatistics: memorySnapshot?.playStatistics ?? [],
       skills: activeGameId === undefined || this.skills === undefined
         ? []
         : this.skills.store.list(activeGameId).map(({ program, lastError: _lastError, ...skill }) => ({ ...skill, stepCount: programStepCount(program) })),

@@ -28,6 +28,8 @@ export interface PcmFormat {
 export interface StreamingRecognitionRequest {
   format: PcmFormat
   onPartial?: (text: string) => void
+  /** Transport-local durations only. Never include audio, text or credentials. */
+  onDiagnostic?: (event: Record<string, string | number>) => void
 }
 
 export interface StreamingRecognitionSession {
@@ -39,6 +41,7 @@ export interface StreamingRecognitionSession {
 export interface SpeechSynthesisRequest {
   text: string
   voice?: string
+  trace?: { processId: number; interactionId: string; playbackId: string }
 }
 
 export interface SpeechSynthesisProvider extends CapabilityProvider {

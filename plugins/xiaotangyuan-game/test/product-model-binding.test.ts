@@ -3,11 +3,12 @@ import { resolveConfig } from '../src/config.js'
 import { MultimodalRouter } from '../src/runtime/multimodal/multimodal-router.js'
 
 describe('product model binding', () => {
-  it('selects the fixed GLM-5V-Turbo route before the saved Harness default', async () => {
+  it('selects the fixed non-reasoning MiniMax-M3 route before the saved Harness default', async () => {
     const resolveModelInfo = vi.fn(async (provider: string, model: string) => ({
       provider,
       id: model,
-      inputModalities: provider === 'zhipu' && model === 'glm-5v-turbo' ? ['text', 'image'] : ['text'],
+      reasoning: { efforts: [{ id: 'off', name: 'Off' }, { id: 'max', name: 'Max' }] },
+      inputModalities: provider === 'minimax' && model === 'MiniMax-M3' ? ['text', 'image'] : ['text'],
     }))
     const router = new MultimodalRouter({
       agentDefaultModel: { currentSelection: () => ({ provider: 'zhipu', model: 'glm-4.6v-flashx' }) },
@@ -15,21 +16,22 @@ describe('product model binding', () => {
     } as never, resolveConfig().vision, {} as never)
 
     await expect(router.selectModel(new AbortController().signal)).resolves.toEqual({
-      provider: 'zhipu',
-      model: 'glm-5v-turbo',
+      provider: 'minimax',
+      model: 'MiniMax-M3',
+      reasoningEffort: 'off',
     })
-    expect(resolveModelInfo).toHaveBeenCalledWith('zhipu', 'glm-5v-turbo', expect.any(AbortSignal))
+    expect(resolveModelInfo).toHaveBeenCalledWith('minimax', 'MiniMax-M3', expect.any(AbortSignal))
   })
 
   it('falls back to a developer-selected image model when the product route is unavailable', async () => {
     const resolveModelInfo = vi.fn(async (provider: string, model: string) => {
-      if (provider === 'zhipu') throw new Error('product route unavailable')
+      if (provider === 'minimax') throw new Error('product route unavailable')
       return { provider, id: model, inputModalities: ['text', 'image'] }
     })
     const router = new MultimodalRouter({
       agentDefaultModel: { currentSelection: () => ({ provider: 'developer', model: 'vision-local' }) },
       llm: { resolveModelInfo, listProviders: () => [] },
-    } as never, resolveConfig().vision, {} as never)
+    } as never, resolveConfig({ vision: { strictModel: false } }).vision, {} as never)
 
     await expect(router.selectModel(new AbortController().signal)).resolves.toEqual({
       provider: 'developer',

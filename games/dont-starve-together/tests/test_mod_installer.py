@@ -48,14 +48,30 @@ class ModInstallerTests(unittest.TestCase):
         self.assertIn('inst.name = "小汤圆"', modmain)
         self.assertIn('label = "小汤圆格数"', modinfo)
 
-    def test_butterfly_skill_uses_server_rpc_and_container_pickup(self) -> None:
+    def test_generic_atoms_use_server_rpc_and_container_pickup(self) -> None:
         modmain = (Path(__file__).parents[1] / "game-mod" / "modmain.lua").read_text(
             encoding="utf-8"
         )
         self.assertIn('AddModRPCHandler(RPC_NAMESPACE, "skill_atom"', modmain)
-        self.assertIn('AddClientModRPCHandler(RPC_NAMESPACE, "skill_result"', modmain)
-        self.assertIn('atom == "dst.find_nearest_butterfly"', modmain)
-        self.assertIn('target.prefab ~= "butterfly"', modmain)
+        self.assertIn(
+            'AddClientModRPCHandler(RPC_NAMESPACE, "skill_result", function(encoded_result)',
+            modmain,
+        )
+        self.assertNotIn("function(recipient_userid, encoded_result)", modmain)
+        self.assertIn(
+            "pcall(SendModRPCToClient, rpc, player.userid, encoded)",
+            modmain,
+        )
+        result_block = modmain.split("local function send_skill_result", 1)[1].split(
+            "local function finish_skill_motion", 1
+        )[0]
+        self.assertIn("if not dedicated then", result_block)
+        self.assertIn("write_json(SKILL_RESULT_PATH, payload)", result_block)
+        self.assertIn('atom == "dst.find_nearest_entity"', modmain)
+        self.assertIn('atom == "dst.attack_target"', modmain)
+        self.assertIn('atom == "dst.collect_items"', modmain)
+        self.assertNotIn('_chester_ai_butterfly_loot_context', modmain)
+        self.assertNotIn('target.prefab ~= "butterfly"', modmain)
         self.assertIn('container:GiveItem(current', modmain)
 
     def test_enables_local_mod_only_once(self) -> None:

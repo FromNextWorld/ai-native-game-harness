@@ -92,7 +92,6 @@ internal sealed class StardewActionModule
 
     public GameActionOutcome Execute(string capability, IReadOnlyDictionary<string, object?> arguments)
     {
-        _ = arguments;
         var timer = Stopwatch.StartNew();
         if (!Context.IsWorldReady || Game1.player is null || Game1.currentLocation is null)
             return this.Reject("WORLD_NOT_READY", "请先进入一个存档。", timer);
@@ -111,7 +110,7 @@ internal sealed class StardewActionModule
         try
         {
             GameActionOutcome outcome = this.farmActions.TryGetValue(capability, out ICompanionAction? action)
-                ? this.ExecuteFarmAction(capability, action, timer)
+                ? this.ExecuteFarmAction(capability, action, arguments, timer)
                 : capability switch
             {
                 StardewCapabilities.FlightTakeoff => this.ExecuteFlight(takeOff: true, timer),
@@ -131,12 +130,20 @@ internal sealed class StardewActionModule
         }
     }
 
-    private GameActionOutcome ExecuteFarmAction(string capability, ICompanionAction action, Stopwatch timer)
+    private GameActionOutcome ExecuteFarmAction(string capability, ICompanionAction action, IReadOnlyDictionary<string, object?> arguments, Stopwatch timer)
     {
         if (!this.stamina.HasAny)
             return this.Reject("STAMINA_EXHAUSTED", this.stamina.BuildExhaustedLine(Game1.timeOfDay), timer);
 
-        ActionResult result = action.Execute(Game1.currentLocation);
+        FieldScope? scope = FieldScope.Parse(arguments, Game1.currentLocation.NameOrUniqueName);
+        if (scope != null && action is not WaterAllAction && action is not HarvestAllAction)
+            return this.Reject("AREA_NOT_SUPPORTED", "这个动作暂不支持指定区域。", timer);
+        ActionResult result = action switch
+        {
+            WaterAllAction water => water.Execute(Game1.currentLocation, scope),
+            HarvestAllAction harvest => harvest.Execute(Game1.currentLocation, scope),
+            _ => action.Execute(Game1.currentLocation),
+        };
         bool changed = result.Count > 0;
         if (!changed)
         {

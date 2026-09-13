@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
+import { reportRuntimeError } from './error-diagnostics.js'
 
 export const PRODUCT_DIAGNOSTIC_PREFIX = 'AI_GAME_HARNESS_DIAGNOSTIC '
 
-export type ProductDiagnosticKind = 'game-agent.latency' | 'voice.latency' | 'voice.failed' | 'voice.cancelled'
+export type ProductDiagnosticKind = 'game-agent.latency' | 'game-session.lifecycle' | 'voice.latency' | 'voice.failed' | 'voice.cancelled' | 'voice.readiness' | 'voice.asr.stage'
 
 export interface ProductDiagnosticRecord {
   schemaVersion: 1
@@ -25,6 +26,10 @@ export function publishProductDiagnostic(
     createdAt: new Date().toISOString(),
     ...input,
   }
-  process.stdout.write(`${PRODUCT_DIAGNOSTIC_PREFIX}${JSON.stringify(record)}\n`)
+  try {
+    process.stdout.write(`${PRODUCT_DIAGNOSTIC_PREFIX}${JSON.stringify(record)}\n`)
+  } catch (error) {
+    reportRuntimeError(error, { stage: 'diagnostic.stdout', interactionId: input.interactionId })
+  }
   return record
 }

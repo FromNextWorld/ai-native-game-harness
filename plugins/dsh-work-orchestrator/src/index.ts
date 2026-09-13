@@ -14,6 +14,8 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'dsh-work-orchestrator'
+export { assertTurnSucceeded } from './turn-outcome.js'
+export type { WorkGameContext, WorkImageRef } from './work-game-context.js'
 export const provide = 'workOrchestrator'
 export const inject = ['agents', 'llm', 'permissionPresets', 'sessions', 'sessionTitle', 'tools']
 

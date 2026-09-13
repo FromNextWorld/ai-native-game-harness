@@ -1,3 +1,4 @@
+import { unlinkSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -98,8 +99,11 @@ describe('ONI Adapter file bridge', () => {
     cleanups.push(async () => { await adapter.close(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(root, { recursive: true, force: true }) })
 
     const hello = await until(async () => messages.find(message => message.method === 'adapter.hello'))
-    const helloParams = hello.params as { atoms?: Array<{ name: string }>; voiceCommands?: Array<{ atom: string; phrases: string[] }> }
+    const helloParams = hello.params as { atoms?: Array<{ name: string; description?: string }>; voiceCommands?: Array<{ atom: string; phrases: string[] }> }
     expect(helloParams.atoms?.map(atom => atom.name)).toContain('oni_companion_absorb_water')
+    const sprayDescription = helloParams.atoms?.find(atom => atom.name === 'oni_companion_spray_water')?.description
+    expect(sprayDescription).toContain('空气、真空、液面均可')
+    expect(sprayDescription).toContain('正上方非实心格')
     expect(helloParams.voiceCommands).toContainEqual({ atom: 'oni_companion_absorb_water', phrases: ['吸水', '收水', '吸走水'] })
 
     const socket = [...server.clients][0]
@@ -140,6 +144,51 @@ describe('ONI Adapter file bridge', () => {
 
     expect(adapter.connectionState()).toBe('disconnected')
     await expect(adapter.observe()).rejects.toThrow('尚未连接')
+  })
+
+  it('treats an outbox deleted during polling as a normal disconnect', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'oni-outbox-race-'))
+    const sessionDir = join(root, String(process.pid))
+    await mkdir(sessionDir)
+    await writeFile(join(sessionDir, 'session.json'), JSON.stringify({ processId: process.pid, saveId: 'closing-colony' }))
+    const outboxPath = join(sessionDir, 'outbox.json')
+    await writeFile(outboxPath, JSON.stringify({ events: [] }))
+    const reported = vi.fn()
+    let removed = false
+    const adapter = new OniAdapter(root, undefined, () => {
+      if (!removed) {
+        removed = true
+        unlinkSync(outboxPath)
+      }
+      return true
+    }, 1_000, reported)
+    adapter.start()
+    cleanups.push(async () => { await adapter.close(); await rm(root, { recursive: true, force: true }) })
+    await new Promise(resolve => setTimeout(resolve, 250))
+
+    expect(adapter.connectionState()).toBe('disconnected')
+    expect(reported).not.toHaveBeenCalled()
+    await writeFile(outboxPath, JSON.stringify({ events: [] }))
+    await until(async () => adapter.connectionState() === 'connected' ? true : undefined)
+  })
+
+  it('contains unexpected polling errors and keeps the Runtime alive', async () => {
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), 'oni-poll-error-'))
+    const root = join(temporaryDirectory, 'not-a-directory')
+    await writeFile(root, 'file')
+    const reported = vi.fn()
+    const adapter = new OniAdapter(root, undefined, () => true, 1_000, reported)
+    adapter.start()
+    cleanups.push(async () => { await adapter.close(); await rm(temporaryDirectory, { recursive: true, force: true }) })
+    await until(async () => reported.mock.calls.length > 0 ? true : undefined)
+
+    expect(adapter.connectionState()).toBe('disconnected')
+    expect(reported).toHaveBeenCalledTimes(1)
+    await rm(root)
+    await mkdir(join(root, '4242'), { recursive: true })
+    await writeFile(join(root, '4242', 'session.json'), JSON.stringify({ processId: 4242, saveId: 'recovered' }))
+    await writeFile(join(root, '4242', 'outbox.json'), JSON.stringify({ events: [] }))
+    await until(async () => adapter.connectionState() === 'connected' ? true : undefined)
   })
 })
 
@@ -275,6 +324,38 @@ describe('ONI Game Adapter protocol without a running game', () => {
 
     await executeWaterTool('water-absorb-1', 'oni_companion_absorb_water', '吸进了 200kg 水')
     await executeWaterTool('water-spray-1', 'oni_companion_spray_water', '喷出了 200kg 水')
+  })
+
+  it('exposes read-only inspection over the protocol and explains actual Bridge evidence', async () => {
+    const { adapter, sessionDir, state } = await fixture()
+    expect((await adapter.hello()).capabilities.some(c => c.name === 'oni_inspect_selected')).toBe(true)
+    const execution = adapter.execute({ requestId: 'inspect-1', gameId: 'oxygen-not-included', capability: 'oni_inspect_selected', arguments: {} })
+    const request = await until(async () => {
+      try {
+        const inbox = JSON.parse(await readFile(join(sessionDir, 'inbox.json'), 'utf8'))
+        return inbox.events.find((e: any) => e.method === 'tool.execute' && e.params.callId === 'inspect-1')
+      } catch { return undefined }
+    })
+    expect(request.params.name).toBe('oni_inspect_selected')
+    const evidence = JSON.stringify({ available: true, capturedAt: new Date().toISOString(), name: '水泵', cell: 123, statuses: ['缺电'], operational: false })
+    await writeFile(join(sessionDir, 'outbox.json'), JSON.stringify({ events: [state, { id: 'inspection-result', method: 'tool.result', params: { callId: 'inspect-1', success: true, reply: evidence } }] }))
+    const result = await execution
+    expect(result.ok).toBe(true)
+    expect(result.result?.reply).toContain('缺电')
+    expect(result.result?.reply).toContain('不能仅凭停机判断整条线路过载')
+  })
+
+  it('routes colony inspection through the actual file request/result protocol', async () => {
+    const { adapter, sessionDir, state } = await fixture()
+    expect((await adapter.hello()).capabilities.some(c => c.name === 'oni_inspect_colony')).toBe(true)
+    const execution = adapter.execute({ requestId: 'colony-1', gameId: 'oxygen-not-included', capability: 'oni_inspect_colony', arguments: {} })
+    await until(async () => {
+      try { const inbox = JSON.parse(await readFile(join(sessionDir, 'inbox.json'), 'utf8')); return inbox.events.find((e: any) => e.params.callId === 'colony-1') } catch { return undefined }
+    })
+    const reply = JSON.stringify({ available: true, capturedAt: new Date().toISOString(), worldId: 0, cycle: 1, oxygenKg: 100, foodKcal: 2000, population: 3, visibleCells: 100 })
+    await writeFile(join(sessionDir, 'outbox.json'), JSON.stringify({ events: [state, { id: 'colony-result', method: 'tool.result', params: { callId: 'colony-1', success: true, reply } }] }))
+    const result = await execution
+    expect(result.ok).toBe(true); expect(result.result?.reply).toContain('2000kcal')
   })
 
   it('runs the same fake Bridge through the real WebSocket handshake and action wire', async () => {

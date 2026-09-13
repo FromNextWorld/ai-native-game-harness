@@ -26,9 +26,13 @@ namespace DoubaoAI.ONI.Harness
         private readonly List<JObject> _outbox = new List<JObject>();
         private System.DateTime _lastStateAtUtc = System.DateTime.MinValue;
         private string _lastSaveId;
+        private bool _disposed;
+        private readonly Dictionary<string, JObject> _toolResults = new Dictionary<string, JObject>();
+        private readonly HashSet<string> _pendingCalls = new HashSet<string>();
 
         internal event Action<string, string> Notification;
-        internal event Func<string, JObject, PlayerCommandExecutionResult> ToolExecution;
+        // Completion runs on the game thread, after simulation acknowledgement for water tools.
+        internal event Action<string, JObject, Action<PlayerCommandExecutionResult>> ToolExecution;
 
         internal OniHarnessBridge(string root)
         {
@@ -142,29 +146,36 @@ namespace DoubaoAI.ONI.Harness
             string name = (string)parameters?["name"];
             JObject arguments = parameters?["args"] as JObject ?? new JObject();
             if (string.IsNullOrWhiteSpace(callId)) return;
+            if (_toolResults.TryGetValue(callId, out JObject cached))
+            { Enqueue("tool.result", (JObject)cached.DeepClone()); return; }
+            if (!_pendingCalls.Add(callId)) return;
             Stopwatch stopwatch = Stopwatch.StartNew();
-            try
+            Action<PlayerCommandExecutionResult> complete = result =>
             {
-                PlayerCommandExecutionResult result = ToolExecution == null
-                    ? new PlayerCommandExecutionResult { Success = false, Reply = "缺氧 Bridge 没有注册工具执行器。" }
-                    : ToolExecution.Invoke(name, arguments);
+                if (_disposed || !_pendingCalls.Remove(callId)) return;
                 stopwatch.Stop();
-                Enqueue("tool.result", new JObject {
+                var payload = new JObject {
                     ["callId"] = callId,
                     ["success"] = result != null && result.Success,
                     ["reply"] = result == null ? "工具没有返回结果。" : result.Reply,
                     ["gameExecutionMs"] = Math.Max(0L, (long)Math.Round(stopwatch.Elapsed.TotalMilliseconds))
-                });
+                };
+                _toolResults[callId] = payload;
+                Enqueue("tool.result", payload);
+            };
+            try
+            {
+                if (name == "oni_inspect_selected")
+                    complete(new PlayerCommandExecutionResult { Success = true, Reply = SelectedObjectEvidence.Capture().ToString(Formatting.None) });
+                else if (name == "oni_inspect_colony")
+                    complete(new PlayerCommandExecutionResult { Success = true, Reply = ColonyEvidence.Capture().ToString(Formatting.None) });
+                else if (ToolExecution == null)
+                    complete(new PlayerCommandExecutionResult { Success = false, Reply = "缺氧 Bridge 没有注册工具执行器。" });
+                else ToolExecution.Invoke(name, arguments, complete);
             }
             catch (Exception ex)
             {
-                stopwatch.Stop();
-                Enqueue("tool.result", new JObject {
-                    ["callId"] = callId,
-                    ["success"] = false,
-                    ["reply"] = "执行失败：" + ex.Message,
-                    ["gameExecutionMs"] = Math.Max(0L, (long)Math.Round(stopwatch.Elapsed.TotalMilliseconds))
-                });
+                complete(new PlayerCommandExecutionResult { Success = false, Reply = "执行失败：" + ex.Message });
             }
         }
 
@@ -229,6 +240,6 @@ namespace DoubaoAI.ONI.Harness
             File.Move(temporary, path);
         }
 
-        public void Dispose() { }
+        public void Dispose() { _disposed = true; _pendingCalls.Clear(); }
     }
 }

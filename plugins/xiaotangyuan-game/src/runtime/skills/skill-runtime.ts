@@ -7,8 +7,10 @@ import type {
   SkillSourceStatement,
   SkillStepTrace,
   SkillValue,
+  SkillRecord,
 } from './contracts.js'
 import { compileSkillSource } from './skill-source.js'
+import { verifySkillResult } from './skill-verification.js'
 
 const IDENTIFIER = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/
 const ATOM = /^[a-z0-9][a-z0-9._-]{2,79}$/
@@ -73,9 +75,12 @@ function resolveReference(value: SkillValue, variables: Map<string, unknown>): S
 
 function isSkillValue(value: unknown, depth = 0): value is SkillValue {
   if (depth > 8) return false
-  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return true
+  if (value === null || typeof value === 'boolean') return true
+  if (typeof value === 'string') return value.length <= 12_000
+  if (typeof value === 'number') return Number.isFinite(value)
   if (Array.isArray(value)) return value.length <= 50 && value.every(item => isSkillValue(item, depth + 1))
   if (typeof value === 'object') {
+    if (Object.keys(value).some(key => ['__proto__', 'prototype', 'constructor'].includes(key))) return false
     const entries = Object.values(value)
     return entries.length <= 50 && entries.every(item => isSkillValue(item, depth + 1))
   }
@@ -100,12 +105,23 @@ class Scope {
 class RecoverableSkillError extends Error {}
 class FatalSkillError extends Error {}
 class BreakSignal extends Error {}
+class ReturnSignal extends Error { constructor(readonly value: SkillValue) { super('return') } }
+
+interface SharedExecution { calls: number, invocations: number, trace: SkillStepTrace[] }
+interface RunOptions {
+  dependencies?: ReadonlyMap<string, SkillRecord>
+  shared?: SharedExecution
+  path?: string[]
+  params?: Record<string, SkillValue>
+}
 
 interface V2ExecutionState {
-  calls: number
+  shared: SharedExecution
   trace: SkillStepTrace[]
   executor: GameAtomExecutor
   signal: AbortSignal
+  path: string[]
+  invoke: (id: string, version: number, args: Record<string, SkillValue>) => Promise<SkillValue>
 }
 
 function referenceValue(path: string[], scope: Scope): unknown {
@@ -158,24 +174,29 @@ async function executeV2Block(
 ): Promise<void> {
   for (const statement of statements) {
     if (state.signal.aborted) throw state.signal.reason
-    if (statement.kind === 'call') {
-      state.calls += 1
-      if (state.calls > MAX_RUNTIME_CALLS) throw new FatalSkillError(`技能单次运行最多调用 ${MAX_RUNTIME_CALLS} 个游戏原子`)
+    if (statement.kind === 'call' || statement.kind === 'skill') {
       const args: Record<string, SkillValue> = {}
       for (const [key, expression] of Object.entries(statement.args)) {
         const value = evaluate(expression, scope)
         if (!isSkillValue(value)) throw new FatalSkillError(`原子参数 ${key} 不是安全值或引用不存在`)
         args[key] = value
       }
+      if (statement.kind === 'skill') {
+        const value = await state.invoke(statement.skillId, statement.version, args)
+        if (statement.saveAs !== undefined) scope.define(statement.saveAs, value)
+        continue
+      }
+      state.shared.calls += 1
+      if (state.shared.calls > MAX_RUNTIME_CALLS) throw new FatalSkillError(`技能单次运行最多调用 ${MAX_RUNTIME_CALLS} 个游戏原子（父子共享）`)
       const index = state.trace.length
       try {
         const result = await state.executor(statement.atom, args, state.signal)
-        state.trace.push({ index, atom: statement.atom, arguments: args, success: true, result })
+        state.trace.push({ index, atom: statement.atom, arguments: args, success: true, result, callPath: state.path })
         if (statement.saveAs !== undefined) scope.define(statement.saveAs, result)
       } catch (error) {
         if (state.signal.aborted) throw state.signal.reason
         const message = error instanceof Error ? error.message : String(error)
-        state.trace.push({ index, atom: statement.atom, arguments: args, success: false, error: message })
+        state.trace.push({ index, atom: statement.atom, arguments: args, success: false, error: message, callPath: state.path })
         throw new RecoverableSkillError(message)
       }
       continue
@@ -210,6 +231,11 @@ async function executeV2Block(
       continue
     }
     if (statement.kind === 'fail') throw new FatalSkillError(statement.message)
+    if (statement.kind === 'return') {
+      const value = evaluate(statement.value, scope)
+      if (!isSkillValue(value)) throw new FatalSkillError('技能返回值不符合安全数据格式')
+      throw new ReturnSignal(value)
+    }
     throw new BreakSignal()
   }
 }
@@ -248,19 +274,49 @@ export class SkillRuntime {
     allowedAtoms: ReadonlySet<string>,
     executor: GameAtomExecutor,
     signal: AbortSignal,
+    options: RunOptions = {},
   ): Promise<SkillRunResult> {
     validateSkillProgram(program, allowedAtoms)
-    if (program.language === 'xiaotangyuan-skill-v1') return runV1(skillId, skillVersion, program, executor, signal)
-
-    const compiled = compileSkillSource(program.source, allowedAtoms)
-    const state: V2ExecutionState = { calls: 0, trace: [], executor, signal }
+    const shared = options.shared ?? { calls: 0, invocations: 0, trace: [] }
+    const path = [...(options.path ?? []), `${skillId}@${skillVersion}`]
+    const start = shared.trace.length
+    const finish = (success: boolean, error?: string, value?: SkillValue): SkillRunResult => ({
+      success, skillId, skillVersion, trace: shared.trace.slice(start),
+      ...(error === undefined ? {} : { error }), ...(value === undefined ? {} : { value }),
+    })
     try {
-      await executeV2Block(compiled.body, new Scope(), state)
-      return { success: true, skillId, skillVersion, trace: state.trace }
+      signal.throwIfAborted()
+      if (path.length > 4 || new Set(path.map(item => item.split('@')[0])).size !== path.length) throw new FatalSkillError('技能调用超深或发生递归')
+      if (++shared.invocations > 30) throw new FatalSkillError('技能调用次数超过父子共享的 30 次上限')
+      if (!isSkillValue(options.params ?? {})) throw new FatalSkillError('技能输入不符合安全数据格式')
+      if (program.language === 'xiaotangyuan-skill-v1') {
+        const result = await runV1(skillId, skillVersion, program, async (atom, args, abort) => {
+          if (++shared.calls > MAX_RUNTIME_CALLS) throw new FatalSkillError('游戏原子超过父子共享的 60 次上限')
+          return executor(atom, args, abort)
+        }, signal)
+        shared.trace.push(...result.trace.map(step => ({ ...step, index: start + step.index, callPath: path })))
+        return finish(result.success, result.error)
+      }
+      const state: V2ExecutionState = { shared, trace: shared.trace, executor, signal, path,
+        invoke: async (id, version, args) => {
+          const child = options.dependencies?.get(`${id}@${version}`)
+          if (!child || !child.verified) throw new FatalSkillError(`找不到已验证的技能版本：${id}@${version}`)
+          const result = verifySkillResult(await this.run(id, version, child.program, allowedAtoms, executor, signal,
+            { ...options, shared, path, params: args }), child.acceptance)
+          if (!result.success) throw new FatalSkillError(`子技能 ${id}@${version} 失败：${result.error}`)
+          return result.value ?? null
+        },
+      }
+      const scope = new Scope()
+      scope.define('params', structuredClone(options.params ?? {}))
+      let returned: SkillValue | undefined
+      try { await executeV2Block(compileSkillSource(program.source, allowedAtoms).body, scope, state) }
+      catch (error) { if (error instanceof ReturnSignal) returned = error.value; else throw error }
+      if (!shared.trace.slice(start).some(step => step.success)) throw new FatalSkillError('技能没有实际执行成功的游戏动作')
+      return finish(true, undefined, returned)
     } catch (error) {
-      if (signal.aborted) throw state.signal.reason
       const message = error instanceof Error ? error.message : String(error)
-      return { success: false, skillId, skillVersion, trace: state.trace, error: message }
+      return finish(false, message)
     }
   }
 }

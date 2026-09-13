@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import type { Dirent } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -20,6 +21,8 @@ import { ReconnectingAdapterClient } from '@ai-native-game-harness/adapter-webso
 import WebSocket from 'ws'
 import { resolveConfig, type Config, type OniInstallerConfig } from './config.js'
 import { detectOni, installOniMod } from './installation.js'
+import { explainSelectedEvidence } from './diagnostics.js'
+import { ColonyTrends } from './colony-trends.js'
 
 type ObjectValue = Record<string, unknown>
 type BridgeEvent = { id: string, method: string, params: ObjectValue }
@@ -30,6 +33,7 @@ const GAME_ID = 'oxygen-not-included'
 const ADAPTER_ID = 'qimidandapigu.oxygen-not-included-fairy'
 const ADAPTER_VERSION = '0.1.6'
 const BRIDGE_HEARTBEAT_MAX_AGE_MS = 10_000
+const POLL_ERROR_LOG_INTERVAL_MS = 5_000
 const objectSchema = (properties: Record<string, JsonValue>, required: string[] = []): Record<string, JsonValue> => ({
   type: 'object',
   additionalProperties: false,
@@ -43,13 +47,15 @@ const actorProperties = {
 } satisfies Record<string, JsonValue>
 const ONI_CAPABILITIES: AdapterCapability[] = [
   { name: 'game.state', kind: 'observation', description: 'Current Oxygen Not Included observation.' },
+  { name: 'oni_inspect_colony', kind: 'action', description: 'Read-only active-world oxygen and food inventory trend check; repeat after game time advances to estimate depletion, no exact reachability guarantee.', inputSchema: objectSchema({}) },
+  { name: 'oni_inspect_selected', kind: 'action', description: 'Read-only selected building/crop inspection: statuses, operating conditions, associated circuit loads and bounded pipe-network endpoints. No colony changes or worker-permission diagnosis.', inputSchema: objectSchema({}) },
   { name: 'oni_move', kind: 'action', description: 'Move one duplicant to the current cursor cell.', inputSchema: objectSchema(actorProperties) },
   { name: 'oni_dig', kind: 'action', description: 'Create a single-cell dig chore at the current cursor cell.', inputSchema: objectSchema(actorProperties) },
   { name: 'oni_dig_path', kind: 'action', description: 'Create a staged dig path toward the current cursor cell.', inputSchema: objectSchema(actorProperties) },
   { name: 'oni_build', kind: 'action', description: 'Build an allowlisted building at the current cursor cell.', inputSchema: objectSchema({ ...actorProperties, buildingKey: { type: 'string' } }, ['buildingKey']) },
   { name: 'oni_companion_follow', kind: 'action', description: 'Change which living duplicant XiaoTangYuan follows.', inputSchema: objectSchema({ actorId: { type: 'number' } }, ['actorId']) },
   { name: 'oni_companion_absorb_water', kind: 'action', description: 'Absorb water from the exact current cursor cell; the cursor must be over supported liquid.', inputSchema: objectSchema({}) },
-  { name: 'oni_companion_spray_water', kind: 'action', description: 'Spray stored water into the exact current cursor cell; the cursor cell must not be solid.', inputSchema: objectSchema({}) },
+  { name: 'oni_companion_spray_water', kind: 'action', description: 'Spray stored water as physical falling droplets at the current cursor. Air, vacuum and liquid targets are allowed; a solid floor uses the non-solid cell directly above. The game validates range and reports the result.', inputSchema: objectSchema({}) },
 ]
 const ONI_ACTIONS = new Set(ONI_CAPABILITIES.filter(item => item.kind === 'action').map(item => item.name))
 
@@ -59,6 +65,7 @@ export const name = 'oni-adapter'
 export const inject = ['tools']
 
 export class OniAdapter implements GameAdapter {
+  private readonly colonyTrends = new ColonyTrends()
   private readonly seen = new Set<string>()
   private readonly forwarded = new Set<string>()
   private readonly inbox: BridgeEvent[] = []
@@ -75,17 +82,36 @@ export class OniAdapter implements GameAdapter {
   private revision = 0
   private observedAt = new Date(0).toISOString()
   private bridgeState: AdapterConnectionState = 'disconnected'
+  private lastPollErrorAt = 0
 
   constructor(
     private readonly root: string,
     private readonly gatewayUrl: string | undefined,
     private readonly processAlive: (processId: number) => boolean = OniAdapter.isProcessAlive,
     private readonly executionTimeoutMs = 15_000,
+    private readonly reportPollError: (error: unknown) => void = error => console.warn('oni-adapter: bridge polling failed', error),
   ) {}
 
-  start(): void { this.timer = setInterval(() => this.poll(), 100); this.poll() }
+  start(): void {
+    if (this.timer !== undefined) return
+    const pollSafely = (): void => {
+      try {
+        this.poll()
+      } catch (error) {
+        try { this.clearBridgeSelection() } catch { /* a subscriber must not crash the polling timer */ }
+        const now = Date.now()
+        if (now - this.lastPollErrorAt >= POLL_ERROR_LOG_INTERVAL_MS) {
+          this.lastPollErrorAt = now
+          try { this.reportPollError(error) } catch { /* diagnostics must not crash the Runtime */ }
+        }
+      }
+    }
+    this.timer = setInterval(pollSafely, 100)
+    pollSafely()
+  }
   async close(): Promise<void> {
     if (this.timer !== undefined) clearInterval(this.timer)
+    this.timer = undefined
     this.disconnect()
     for (const item of this.pending.values()) { clearTimeout(item.timer); item.reject(new Error('ONI Adapter 已关闭')) }
     this.pending.clear()
@@ -121,7 +147,10 @@ export class OniAdapter implements GameAdapter {
       return this.actionError(request, 'REVISION_CONFLICT', `Expected revision ${request.expectedRevision}, current revision is ${this.revision}`)
     }
     try {
-      const result = await this.executeBridgeTool(request.capability, request.arguments, AbortSignal.timeout(this.executionTimeoutMs), request.requestId)
+      const raw = await this.executeBridgeTool(request.capability, request.arguments, AbortSignal.timeout(this.executionTimeoutMs), request.requestId)
+      const result = request.capability === 'oni_inspect_selected' && raw.success
+        ? { ...raw, ...explainSelectedEvidence(raw.reply) }
+        : request.capability === 'oni_inspect_colony' && raw.success ? { ...raw, ...this.colonyTrends.inspect(raw.reply, this.saveId!) } : raw
       return {
         requestId: request.requestId,
         ok: result.success,
@@ -153,6 +182,8 @@ export class OniAdapter implements GameAdapter {
 
   async executeTool(name: string, args: ObjectValue, signal: AbortSignal): Promise<ToolResult> {
     const result = await this.executeBridgeTool(name, args, signal, randomUUID())
+    if (name === 'oni_inspect_selected' && result.success) return explainSelectedEvidence(result.reply)
+    if (name === 'oni_inspect_colony' && result.success) return this.colonyTrends.inspect(result.reply, this.saveId!)
     return { success: result.success, reply: result.reply }
   }
 
@@ -163,7 +194,7 @@ export class OniAdapter implements GameAdapter {
     const targetCell = typeof cursor === 'object' && cursor !== null && Number.isInteger((cursor as ObjectValue).cell)
       ? (cursor as ObjectValue).cell
       : undefined
-    if (name !== 'oni_companion_follow' && targetCell === undefined) throw new Error('缺氧 Adapter 尚未收到有效的鼠标格子')
+    if (name !== 'oni_companion_follow' && name !== 'oni_inspect_selected' && name !== 'oni_inspect_colony' && targetCell === undefined) throw new Error('缺氧 Adapter 尚未收到有效的鼠标格子')
     const promise = new Promise<BridgeToolResult>((resolve, reject) => {
       const startedAt = performance.now()
       const timer = setTimeout(() => { this.pending.delete(callId); reject(new Error(`缺氧工具执行超时：${name}`)) }, this.executionTimeoutMs)
@@ -188,9 +219,8 @@ export class OniAdapter implements GameAdapter {
   }
 
   private poll(): void {
-    if (!existsSync(this.root)) return
     const candidates: Array<{ directory: string, processId: number, saveId: string, modifiedAt: number }> = []
-    for (const entry of readdirSync(this.root, { withFileTypes: true })) {
+    for (const entry of this.readBridgeDirectories()) {
       if (!entry.isDirectory()) continue
       const directory = join(this.root, entry.name)
       const sessionPath = join(directory, 'session.json')
@@ -199,8 +229,8 @@ export class OniAdapter implements GameAdapter {
       const pid = session?.processId
       if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) continue
       if (!this.processAlive(pid)) continue
-      if (!existsSync(outboxPath)) continue
-      const bridgeHeartbeatAt = statSync(outboxPath).mtimeMs
+      const bridgeHeartbeatAt = this.modifiedAt(outboxPath)
+      if (bridgeHeartbeatAt === undefined) continue
       if (Date.now() - bridgeHeartbeatAt > BRIDGE_HEARTBEAT_MAX_AGE_MS) continue
       const saveId = typeof session?.saveId === 'string' && /^[a-zA-Z0-9._:-]{1,128}$/.test(session.saveId)
         ? session.saveId
@@ -209,12 +239,7 @@ export class OniAdapter implements GameAdapter {
     }
     const selected = candidates.sort((left, right) => right.modifiedAt - left.modifiedAt)[0]
     if (selected === undefined) {
-      this.directory = undefined
-      this.observation = undefined
-      this.processId = undefined
-      this.saveId = undefined
-      this.disconnect()
-      this.setBridgeState('disconnected')
+      this.clearBridgeSelection()
       return
     }
     this.directory = selected.directory
@@ -236,6 +261,7 @@ export class OniAdapter implements GameAdapter {
     if (typeof raw !== 'object' || raw === null) return
     const event = raw as BridgeEvent
     if (typeof event.id !== 'string' || typeof event.method !== 'string') return
+    if (typeof event.params !== 'object' || event.params === null || Array.isArray(event.params)) return
     if (event.method === 'tool.result') {
       if (this.seen.has(event.id)) return
       this.seen.add(event.id)
@@ -296,7 +322,7 @@ export class OniAdapter implements GameAdapter {
       protocolVersion: '1.1', capabilities: ['assistant.text-stream'], processId, saveId,
       atoms: [
         { name: 'oni_companion_absorb_water', description: '吸收鼠标格的水', parameters: '{}', returns: '{"success":boolean,"reply":string}' },
-        { name: 'oni_companion_spray_water', description: '向鼠标格喷水', parameters: '{}', returns: '{"success":boolean,"reply":string}' },
+        { name: 'oni_companion_spray_water', description: '向鼠标处喷出真实液滴：空气、真空、液面均可，指地板则使用正上方非实心格；由游戏校验距离并返回结果', parameters: '{}', returns: '{"success":boolean,"reply":string}' },
       ],
       voiceCommands: [
         { atom: 'oni_companion_absorb_water', phrases: ['吸水', '收水', '吸走水'] },
@@ -356,6 +382,35 @@ export class OniAdapter implements GameAdapter {
 
   private read(path: string): ObjectValue | undefined { try { return JSON.parse(readFileSync(path, 'utf8')) as ObjectValue } catch { return undefined } }
 
+  private readBridgeDirectories(): Dirent<string>[] {
+    try {
+      return readdirSync(this.root, { withFileTypes: true })
+    } catch (error) {
+      if (OniAdapter.isTransientFileError(error)) return []
+      throw error
+    }
+  }
+
+  private modifiedAt(path: string): number | undefined {
+    try {
+      return statSync(path).mtimeMs
+    } catch (error) {
+      // ONI removes its per-process bridge directory while exiting. Missing or
+      // briefly locked files are a normal disconnect, not a Runtime failure.
+      if (OniAdapter.isTransientFileError(error)) return undefined
+      throw error
+    }
+  }
+
+  private clearBridgeSelection(): void {
+    this.directory = undefined
+    this.observation = undefined
+    this.processId = undefined
+    this.saveId = undefined
+    this.disconnect()
+    this.setBridgeState('disconnected')
+  }
+
   private disconnect(): void {
     const socket = this.socket
     if (socket === undefined) return
@@ -384,6 +439,11 @@ export class OniAdapter implements GameAdapter {
     try { process.kill(processId, 0); return true }
     catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
   }
+
+  private static isTransientFileError(error: unknown): boolean {
+    const code = (error as NodeJS.ErrnoException).code
+    return code === 'ENOENT' || code === 'EPERM' || code === 'EBUSY' || code === 'EACCES'
+  }
 }
 
 const resultSchema = { type: 'object', additionalProperties: false, properties: { success: { type: 'boolean', required: true }, reply: { type: 'string', required: true } } } as const
@@ -394,6 +454,8 @@ export function registerOniTools(ctx: Context, adapter: OniAdapter): void {
     ctx.tools.register(defineTool({ name, description, parameters: parameters as never, output: { schema: resultSchema, render: (_args, value) => [{ type: 'text', text: value.reply }] }, execute: async (args, exec) => adapter.executeTool(name, args, exec.signal) }))
   }
   register('oni_move', 'Move one named/selected Oxygen Not Included duplicant to the current cursor cell. Never use for a colony.', actor)
+  register('oni_inspect_colony', '只读查询当前世界氧气、食物总量和库存净变化；游戏推进后多次检查才能估计耗尽时间，不保证资源可达或适合所有复制人。', {})
+  register('oni_inspect_selected', '只读检查选中建筑或作物的实际状态、关联电路负载和管网端点；不臆测任务权限或整座基地。', {})
   register('oni_dig', 'Create a validated single-cell dig chore at the current ONI cursor cell.', actor)
   register('oni_dig_path', 'Create a validated staged dig path toward the current ONI cursor cell.', actor)
   register('oni_build', 'Build an allowlisted ONI building at the current cursor cell.', { ...actor, buildingKey: { type: 'string', required: true, description: 'One of ladder, tile, outhouse, flush_toilet, wash_basin, bed, research_center, storage_locker, manual_generator.' } })
@@ -401,7 +463,7 @@ export function registerOniTools(ctx: Context, adapter: OniAdapter): void {
     actorId: { type: 'number', required: true, description: 'Exact duplicant id from the current ONI observation.' },
   })
   register('oni_companion_absorb_water', 'Use XiaoTangYuan\'s learned water skill to absorb water from the exact current ONI cursor cell. Call when the player explicitly asks to absorb, collect, or remove water here. The cursor must be directly over supported liquid, and only report success when the tool returns success=true.', {})
-  register('oni_companion_spray_water', 'Use XiaoTangYuan\'s learned water skill to spray stored water into the exact current ONI cursor cell. Call when the player explicitly asks to spray, release, or place water here. The cursor cell must be non-solid, and only report success when the tool returns success=true.', {})
+  register('oni_companion_spray_water', 'Use XiaoTangYuan\'s learned water skill to spray stored water as physical falling droplets at the current ONI cursor. Call when the player explicitly asks to spray, release, or place water here. Air, vacuum and other liquids are valid targets; do not refuse because air is present. A solid floor uses the non-solid cell directly above. Let the game validate range and only report success when the tool returns success=true.', {})
 }
 
 export function registerOniInstallTools(ctx: Context, installer: OniInstallerConfig): void {
@@ -479,7 +541,13 @@ export function registerOniInstallTools(ctx: Context, installer: OniInstallerCon
 
 export function apply(ctx: Context, config: Config = {}): void {
   const resolved = resolveConfig(config)
-  const adapter = new OniAdapter(resolved.bridgeRoot, `ws://${resolved.host}:${resolved.port}`)
+  const adapter = new OniAdapter(
+    resolved.bridgeRoot,
+    `ws://${resolved.host}:${resolved.port}`,
+    undefined,
+    undefined,
+    error => ctx.logger.warn('oni-adapter: bridge polling failed', error),
+  )
   const protocolClient = resolved.adapterProtocolUrl === undefined
     ? undefined
     : new ReconnectingAdapterClient({

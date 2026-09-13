@@ -26,10 +26,17 @@ internal static class Protocol
     public static void Error(string message, string? requestId = null) => Send(new { type = "error", requestId, message });
 }
 
-internal sealed record WindowCapture(byte[] Png, int Width, int Height);
+internal sealed record WindowCapture(byte[] Bytes, string MediaType, int Width, int Height);
 
 internal static class WindowCaptureService
 {
+    private const int MaximumEncodedBytes = 100_000;
+    private const int MaximumOutputWidth = 960;
+    private const int MinimumOutputWidth = 320;
+    private static readonly long[] JpegQualities = [65, 55, 45, 35, 25, 15, 8, 3];
+    private static readonly ImageCodecInfo JpegEncoder = ImageCodecInfo.GetImageEncoders()
+        .First(codec => codec.MimeType == "image/jpeg");
+
     public static void EnableDpiAwareness()
     {
         try { _ = SetProcessDpiAwarenessContext(new IntPtr(-4)); }
@@ -68,25 +75,49 @@ internal static class WindowCaptureService
             graphics.CopyFromScreen(origin.X, origin.Y, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
         }
 
-        int outputWidth = Math.Min(width, maxWidth);
-        int outputHeight = Math.Max(1, (int)Math.Round(height * (outputWidth / (double)width)));
-        using Bitmap output = outputWidth == width
-            ? new Bitmap(source)
-            : Resize(source, outputWidth, outputHeight);
-        using var stream = new MemoryStream();
-        output.Save(stream, ImageFormat.Png);
-        return new WindowCapture(stream.ToArray(), output.Width, output.Height);
+        int outputWidth = Math.Min(width, Math.Min(maxWidth, MaximumOutputWidth));
+        while (true)
+        {
+            int outputHeight = Math.Max(1, (int)Math.Round(height * (outputWidth / (double)width)));
+            using Bitmap output = outputWidth == width
+                ? new Bitmap(source)
+                : Resize(source, outputWidth, outputHeight);
+            foreach (long quality in JpegQualities)
+            {
+                byte[] encoded = EncodeJpeg(output, quality);
+                if (encoded.Length <= MaximumEncodedBytes)
+                {
+                    return new WindowCapture(encoded, "image/jpeg", output.Width, output.Height);
+                }
+            }
+
+            if (outputWidth <= MinimumOutputWidth) break;
+            outputWidth = Math.Max(MinimumOutputWidth, (int)Math.Floor(outputWidth * 0.8));
+        }
+
+        throw new InvalidOperationException("游戏窗口截图无法压缩到 100KB 以内");
     }
 
     private static Bitmap Resize(Bitmap source, int width, int height)
     {
         var resized = new Bitmap(width, height, PixelFormat.Format24bppRgb);
         using Graphics graphics = Graphics.FromImage(resized);
-        graphics.CompositingQuality = CompositingQuality.HighQuality;
-        graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-        graphics.SmoothingMode = SmoothingMode.HighQuality;
+        graphics.CompositingMode = CompositingMode.SourceCopy;
+        graphics.CompositingQuality = CompositingQuality.HighSpeed;
+        graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+        graphics.PixelOffsetMode = PixelOffsetMode.Half;
+        graphics.SmoothingMode = SmoothingMode.None;
         graphics.DrawImage(source, 0, 0, width, height);
         return resized;
+    }
+
+    private static byte[] EncodeJpeg(Bitmap image, long quality)
+    {
+        using var stream = new MemoryStream();
+        using var parameters = new EncoderParameters(1);
+        parameters.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, quality);
+        image.Save(stream, JpegEncoder, parameters);
+        return stream.ToArray();
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -635,8 +666,8 @@ internal static class Program
                                 type = "capture.completed",
                                 requestId,
                                 processId,
-                                mediaType = "image/png",
-                                imageBase64 = Convert.ToBase64String(capture.Png),
+                                mediaType = capture.MediaType,
+                                imageBase64 = Convert.ToBase64String(capture.Bytes),
                                 width = capture.Width,
                                 height = capture.Height
                             });

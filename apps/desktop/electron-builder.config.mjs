@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { verifyRelease } from '../../scripts/release-source.mjs'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(desktopRoot, '../..')
@@ -9,6 +10,7 @@ const archiveName = `qimidandapigu-dsh-xiaotangyuan-game-${manifest.development.
 const workArchiveName = `qimidandapigu-dsh-work-orchestrator-${manifest.workOrchestrator.expectedVersion}.tgz`
 
 export default {
+  beforePack: async () => { verifyRelease() },
   appId: 'com.qimidandapigu.ai-native-game-harness',
   productName: 'AI Native Game Harness 游戏版',
   electronVersion: '43.4.1',
@@ -26,6 +28,11 @@ export default {
     'package.json',
   ],
   extraResources: [
+    {
+      from: resolve(repoRoot, '.artifacts/dst-package'),
+      to: 'game-installers/dont-starve-together',
+      filter: ['bundle.json', '*.zip'],
+    },
     {
       from: resolve(repoRoot, '.artifacts/desktop-runtime/package.json'),
       to: 'runtime/package.json',

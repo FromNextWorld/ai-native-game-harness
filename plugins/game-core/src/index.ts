@@ -17,6 +17,7 @@ export interface GameTraceEntry {
 
 /** Machine-readable stdout record consumed by the Desktop main process. */
 export const PRODUCT_SNAPSHOT_PREFIX = 'AI_GAME_HARNESS_SNAPSHOT '
+export const MAX_CACHED_OBSERVATIONS = 64
 
 export interface Config {
   /** Emit machine-readable snapshots for the Desktop parent process. */
@@ -49,12 +50,22 @@ export class GameCoreService extends Service {
     if (previous !== undefined && observation.revision < previous.revision) {
       throw new Error(`stale observation revision ${observation.revision}; current is ${previous.revision}`)
     }
+    this.observations.delete(key)
     this.observations.set(key, structuredClone(observation))
+    while (this.observations.size > MAX_CACHED_OBSERVATIONS) {
+      const oldestKey = this.observations.keys().next().value
+      if (oldestKey === undefined) break
+      this.observations.delete(oldestKey)
+    }
   }
 
   getObservation(gameId: string, saveId = 'default'): GameObservation | undefined {
-    const value = this.observations.get(this.observationKey(gameId, saveId))
-    return value === undefined ? undefined : structuredClone(value)
+    const key = this.observationKey(gameId, saveId)
+    const value = this.observations.get(key)
+    if (value === undefined) return undefined
+    this.observations.delete(key)
+    this.observations.set(key, value)
+    return structuredClone(value)
   }
 
   record(entry: Omit<GameTraceEntry, 'id' | 'timestamp'>): GameTraceEntry {

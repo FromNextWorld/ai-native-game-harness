@@ -33,6 +33,9 @@ if (-not (Test-Path -LiteralPath $oniArchivePath -PathType Leaf)) {
   throw "Desktop ONI Adapter archive was not found: $oniArchivePath"
 }
 
+& (Join-Path $repoRoot 'games/dont-starve-together/scripts/build-player-package.ps1') -OutputDirectory (Join-Path $repoRoot '.artifacts/dst-package')
+if ($LASTEXITCODE -ne 0) { throw 'Desktop bundled TS DST package failed' }
+
 foreach ($generatedRoot in @($runtimeRoot, $appRoot)) {
   $resolvedGeneratedRoot = [IO.Path]::GetFullPath($generatedRoot)
   if (-not $resolvedGeneratedRoot.StartsWith($artifactRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
@@ -82,6 +85,11 @@ try {
 }
 
 $runtimeModules = Join-Path $runtimeRoot 'node_modules'
+# Cordis imports by package name from the bundled Runtime, while DSH client
+# discovery resolves from the profile. Ship this package in Runtime as well as
+# staging the profile-visible copy when Desktop starts.
+node --input-type=module -e "import { pathToFileURL } from 'node:url'; const { stageGameUiPlugin } = await import(pathToFileURL(process.argv[1])); stageGameUiPlugin(process.argv[2], process.argv[3]);" (Join-Path $sourceRoot 'game-ui-staging.mjs') (Join-Path $sourceRoot 'game-ui-plugin') $runtimeRoot
+if ($LASTEXITCODE -ne 0) { throw 'Desktop native settings Runtime package staging failed' }
 $runtimeScopeRoot = Join-Path $runtimeModules '@ai-native-game-harness'
 New-Item -ItemType Directory -Force -Path $runtimeScopeRoot | Out-Null
 $runtimePackages = @(

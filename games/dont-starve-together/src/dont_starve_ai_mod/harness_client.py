@@ -51,6 +51,7 @@ class HarnessClient:
         self._connected = threading.Event()
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
+        self._generation = 0
 
     @property
     def connected(self) -> bool:
@@ -95,27 +96,28 @@ class HarnessClient:
                             "protocolVersion": "1.1",
                             "capabilities": [
                                 "assistant.text-stream",
-                                "dst.find_nearest_butterfly",
-                                "dst.attack_butterfly",
-                                "dst.collect_butterfly_loot",
+                                "game.atom.lease-v1",
+                                "dst.find_nearest_entity",
+                                "dst.attack_target",
+                                "dst.collect_items",
                             ],
                             "atoms": [
                                 {
-                                    "name": "dst.find_nearest_butterfly",
-                                    "description": "在玩家附近寻找最近的活蝴蝶，不移动也不攻击",
-                                    "parameters": '{"radius": 2到25的搜索半径}',
-                                    "returns": '{"targetId": 蝴蝶实体ID, "x": 数字, "z": 数字}',
+                                    "name": "dst.find_nearest_entity",
+                                    "description": "按 prefab 或 prefabs 在玩家附近寻找最近的实体，不移动也不攻击；排除死亡实体",
+                                    "parameters": '{"prefab": 实体类型或使用prefabs数组, "radius": 2到25的搜索半径}',
+                                    "returns": '{"targetId": 实体ID, "prefab": 实际类型, "x": 数字, "z": 数字}',
                                 },
                                 {
-                                    "name": "dst.attack_butterfly",
-                                    "description": "让小汤圆追击指定蝴蝶并攻击一次",
-                                    "parameters": '{"targetId": 来自寻找原子的蝴蝶实体ID}',
-                                    "returns": '{"targetId": 实体ID, "defeated": true, "x": 击杀位置, "z": 击杀位置}',
+                                    "name": "dst.attack_target",
+                                    "description": "让小汤圆追击指定可攻击目标并攻击一次，不攻击玩家或同伴；不会自动循环击杀",
+                                    "parameters": '{"targetId": 来自观察或寻找原子的实体ID}',
+                                    "returns": '{"targetId": 实体ID, "defeated": 实际死亡布尔值, "x": 数字, "z": 数字}',
                                 },
                                 {
-                                    "name": "dst.collect_butterfly_loot",
-                                    "description": "让小汤圆到指定位置附近拾取蝴蝶翅膀或黄油并放入容器",
-                                    "parameters": '{"x": 数字, "z": 数字, "radius": 1到8的搜索半径}',
+                                    "name": "dst.collect_items",
+                                    "description": "按 prefab 或 prefabs 拾取指定位置附近的地面物品并放入容器，可用 excludeIds 排除实体",
+                                    "parameters": '{"prefabs": 物品类型数组或使用prefab字符串, "x": 数字, "z": 数字, "radius": 1到8, "excludeIds": 可选实体ID数组}',
                                     "returns": '{"count": 拾取数量, "items": 物品prefab数组}',
                                 },
                             ],
@@ -149,7 +151,8 @@ class HarnessClient:
             method = message.get("method")
             params = message.get("params")
             if isinstance(request_id, (str, int)) and isinstance(method, str):
-                request_params = params if isinstance(params, dict) else {}
+                request_params = dict(params) if isinstance(params, dict) else {}
+                request_params["_connectionGeneration"] = self._generation
                 threading.Thread(
                     target=self._handle_server_request,
                     args=(request_id, method, request_params),
@@ -235,6 +238,8 @@ class HarnessClient:
 
     def _disconnect(self) -> None:
         self._connected.clear()
+        self._generation += 1
+        self.on_notification("game.atom.disconnected", {})
         with self._socket_lock:
             socket = self._socket
             self._socket = None

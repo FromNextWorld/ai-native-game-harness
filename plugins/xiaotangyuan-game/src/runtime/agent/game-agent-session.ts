@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { publishProductDiagnostic } from '../diagnostics.js'
+import { reportRuntimeError } from '../error-diagnostics.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
@@ -8,6 +9,7 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import {
+  assertTurnSucceeded,
   linkedWorkIntentShortcut,
   obviousExternalWorkRequest,
   type WorkContextSnapshot,
@@ -20,9 +22,15 @@ import { StreamingReplyAccumulator, type StreamingReplyUpdate } from './streamin
 import type { MemoryService } from '../memory/memory-service.js'
 import type { GameAtomExecutor } from '../skills/contracts.js'
 import type { SkillService } from '../skills/skill-service.js'
-import { registerSkillTools } from '../../tools/skill-tools.js'
+import { registerSkillTools, LearningTurnBudget, continueLearningRevisions, learningOutcomeReply } from '../../tools/skill-tools.js'
+import { acceptanceForGameTask } from '../tasks/game-task-acceptance.js'
 import { renderGameContextForPrompt } from '../context/game-context.js'
-import { keepRecentConversationTurns, pruneHistoricalImages } from './context-history.js'
+import { gameContextHistory } from '../context/game-context-history.js'
+import { keepRecentConversationTurns, pruneHistoricalImages, pruneHistoricalProjectileState } from './context-history.js'
+import { isMissingSession, sessionOwnership, waitForSessionIdle, type SessionLease } from './session-ownership.js'
+import { LearningIntentBoundary } from './learning-intent-boundary.js'
+import { gameActionCatalog, hasSwordActions } from './game-action-policy.js'
+import { PROJECTILE_ATOMS } from '../tasks/sword-formation.js'
 
 export type InteractionSource = 'chat' | 'voice' | 'retry'
 
@@ -33,9 +41,10 @@ When the current turn includes “Current linked non-game work” and the player
 In every player-facing reply, never expose implementation details or terms such as worker, work session, background task, classifier, Codex, DSH, tool, or thread. Only a later confirmed update may refer to a helper as “另一位 NPC” in Chinese or the natural equivalent in the player's language.
 For ordinary conversation and game requests, respond normally according to the current game context and available game tools.`
 
-const SESSION_RELEASE_TIMEOUT_MS = 10_000
-const SESSION_RELEASE_POLL_MS = 50
 const COMPANION_MAX_TOKENS = 512
+export function gameTurnMaxTokens(learning: boolean): number {
+  return learning ? 4096 : COMPANION_MAX_TOKENS
+}
 
 export interface AssistantProgress extends StreamingReplyUpdate {
   source: InteractionSource
@@ -93,6 +102,11 @@ function latestAssistantText(events: readonly SessionEvent[], firstSeq: number):
   return text
 }
 
+/** whenIdle reports quiescence, not successful completion of the submitted turn. */
+export function assertGameTurnSucceeded(events: readonly SessionEvent[], firstSeq: number): void {
+  assertTurnSucceeded(events, firstSeq)
+}
+
 export function formatGamePrompt(
   adapter: AdapterHello | undefined,
   request: GameChatRequest,
@@ -111,14 +125,14 @@ export function formatGamePrompt(
     context.nearbyNpc === undefined ? undefined : `Nearby NPC: ${context.nearbyNpc}`,
   ].filter((item): item is string => item !== undefined)
   const gameContext = renderGameContextForPrompt(context.observation, adapter)
-  const postReplyActions = (adapter?.voiceCommands ?? []).map(command => {
-    const definition = adapter?.atoms?.find(atom => atom.name === command.atom)
-    return `${command.phrases.join('、')} -> ${command.atom}${definition === undefined ? '' : `（${definition.description}）`}`
-  })
+  const postReplyActions = gameActionCatalog(adapter).map(command => `${command.examples.join('、')} -> ${command.atom}（${command.description ?? ''}）`)
   return [
     'You are an in-game AI companion.',
     'Reply in the same language as the player, naturally and briefly (at most two short sentences). You speak through a small in-game bubble, so never paste a document, report, long list, or full work result into the reply.',
     'Do not use Markdown. Never claim a game action succeeded unless a game tool returned an explicit successful result in this turn.',
+    'If the current speech is a fragment or ambiguous, ask briefly what the player meant. Do not infer a summon, recall, mode switch or cooldown from earlier conversation. Cooldown and active formation are unknown unless fresh game evidence explicitly states them; a previous tool description is not evidence.',
+    'Only an image attached to this turn is the current screenshot. Inspect it directly; never pass its attachment id or hash to read_image. If none is attached, use text/structured state, never claim to see the screen or substitute old images. If visual evidence is essential, say it is unavailable and ask for the game window.',
+    '玩家要求执行游戏动作不是角色扮演。除明确声明交给回答后动作阶段的能力外，必须实际调用本轮提供的对应游戏工具，不能仅用文字描述动作。优先使用现成专用工具；专用工具不依赖已学习技能列表，列表为空也不必新建技能。没有工具调用及明确成功回执就不能说已召唤、已完成或已收回。',
     postReplyActions.length === 0
       ? undefined
       : `Adapter-declared actions are executed by a separate post-reply game-action stage after your public answer. For a clear matching request, say naturally that you are about to act; do not claim completion and do not call any game tool or learned-skill tool for these actions in this turn. This game-action stage is independent from the separate post-turn work service, and both may coexist. Available post-reply actions:\n${postReplyActions.join('\n')}`,
@@ -159,7 +173,12 @@ export function formatGamePrompt(
  * It does not own Session persistence, replay, model routing, or Tool logs.
  */
 export class GameAgentSession {
+  private readonly learningIntent = new LearningIntentBoundary()
+  private readonly learningBudget = new LearningTurnBudget()
+  private readonly learningSessions = new Set<string>()
   private handle?: AgentHandle
+  private lease?: SessionLease<AgentHandle>
+  private readonly lifecycle = new AbortController()
   private ensureAgentTask?: Promise<AgentHandle>
   private ensureAgentKey?: string
   private selection?: ModelSelection
@@ -181,6 +200,7 @@ export class GameAgentSession {
       companionSessionId: sessionId,
       playerText: request.text,
       companionReply: reply,
+      gameContext: gameContextHistory.record(sessionId, this.adapter, request),
       ...(selection === undefined ? {} : { selection }),
       source,
       companion: {
@@ -220,12 +240,26 @@ export class GameAgentSession {
     return (agentCtx) => {
         const selected: ModelSelectionRef = { current: selection, assembled: undefined }
         installModelSelection(agentCtx, selected)
+        this.learningIntent.install(agentCtx, selection)
+        if (hasSwordActions(this.adapter)) {
+          const deferred = new Set(['xiaotangyuan_sword_formation', 'xiaotangyuan_sword_formation_stop', 'xiaotangyuan_grandpa_water'])
+          agentCtx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+            const request = await next()
+            return { ...request, ...(request.tools === undefined ? {} : { tools: request.tools.filter(tool => !deferred.has(tool.name)) }) }
+          })
+        }
+        agentCtx.on('agent/request', async (payload, next) => ({
+          ...await next(),
+          maxTokens: gameTurnMaxTokens(this.learningSessions.has(String(payload.agent.session.id))),
+        }))
         // The companion answers first and routes office work only after its
         // reply. Keep production tools out of this fast conversational Session.
         agentCtx.inject(['tools'], (scoped) => {
-          const workOnlyTools = new Set(['read', 'write', 'edit', 'glob', 'grep', 'pwsh', 'web_search'])
+          const workOnlyTools = new Set(['read', 'write', 'edit', 'glob', 'grep', 'pwsh', 'web_search', 'generate_image'])
+          scoped.tools.restrict({ deny: ['generate_image'] })
           const denied = scoped.tools.schemas().map(tool => tool.name).filter(name => workOnlyTools.has(name))
           if (denied.length > 0) scoped.tools.restrict({ deny: denied })
+          if (hasSwordActions(this.adapter)) scoped.tools.restrict({ deny: ['xiaotangyuan_sword_formation', 'xiaotangyuan_sword_formation_stop', 'xiaotangyuan_grandpa_water'] })
         })
         agentCtx.systemPrompt.section({
           name: 'xiaotangyuan:companion-policy',
@@ -233,57 +267,74 @@ export class GameAgentSession {
           text: COMPANION_SYSTEM_POLICY,
         })
         if (this.skills !== undefined && this.atomExecutor !== undefined) {
-          registerSkillTools(agentCtx, this.adapter, this.skills, this.atomExecutor)
+          const execute: GameAtomExecutor = (atom, args, signal) => {
+            // Saved/custom skill code must not bypass the same projectile boundary.
+            // Explicit recall is handled immediately by Gateway, not by this model turn.
+            if (hasSwordActions(this.adapter) && PROJECTILE_ATOMS.includes(atom)) throw new Error('剑阵动作由回复后的阶段判断执行；当前尚未执行，不得宣称成功或冷却。')
+            return this.atomExecutor!(atom, args, signal)
+          }
+          registerSkillTools(agentCtx, this.adapter, this.skills, execute, this.learningBudget)
         }
         agentCtx.on('session/event', (session, event) => this.onSessionEvent(String(session.id), event))
     }
   }
 
   private async createAgent(selection: ModelSelection, sessionId = SessionId(`game-compose-${randomUUID()}`)): Promise<AgentHandle> {
+    const agentOptions = { ...selection, maxTokens: COMPANION_MAX_TOKENS }
     const handle = await this.ctx.agents.create({
       sessionId,
+      signal: this.lifecycle.signal,
       meta: { cwd: process.cwd() },
-      agentOptions: { provider: selection.provider, model: selection.model, maxTokens: COMPANION_MAX_TOKENS },
+      agentOptions,
       setup: this.setupAgent(selection),
     })
-    await handle.agent.whenIdle()
-    return handle
-  }
-
-  private async waitForSessionRelease(id: ReturnType<typeof SessionId>): Promise<void> {
-    const deadline = Date.now() + SESSION_RELEASE_TIMEOUT_MS
-    while (this.ctx.agents.get(id) !== undefined || this.ctx.sessions.get(id) !== undefined) {
-      if (Date.now() >= deadline) {
-        throw new Error(`旧游戏连接仍在释放会话“${id}”，请稍后再试`)
-      }
-      await new Promise(resolve => setTimeout(resolve, SESSION_RELEASE_POLL_MS))
+    try {
+      await waitForSessionIdle(handle.agent.whenIdle(), this.lifecycle.signal)
+      this.lifecycle.signal.throwIfAborted()
+      return handle
+    } catch (error) {
+      await handle.dispose()
+      throw error
     }
   }
 
   private async resumeOrCreateAgent(selection: ModelSelection, sessionId: string): Promise<AgentHandle> {
     const id = SessionId(sessionId)
-    await this.waitForSessionRelease(id)
+    const agentOptions = { ...selection, maxTokens: COMPANION_MAX_TOKENS }
+    const borrow = async (agent: AgentHandle['agent']): Promise<AgentHandle> => {
+      if (agent.session.header.origin === 'subagent') throw new Error('游戏会话不能接管工作子会话')
+      await waitForSessionIdle(agent.whenIdle(), AbortSignal.any([this.lifecycle.signal, AbortSignal.timeout(15_000)]))
+      this.lifecycle.signal.throwIfAborted()
+      // The Desktop may have already resumed this ordinary Session. Install game
+      // policy in a disposable child fiber; we do NOT own its Agent disposer.
+      const binding = agent.ctx.plugin((bindingCtx) => {
+        this.setupAgent(selection)(bindingCtx)
+      })
+      try { await binding } catch (error) { await binding.dispose(); throw error }
+      publishProductDiagnostic({ kind: 'game-session.lifecycle', sessionId, gameId: this.adapter?.gameId, detail: { phase: 'borrowed-live-agent', provider: selection.provider, model: selection.model } })
+      return { agent, dispose: async () => { await agent.whenIdle(); await binding.dispose() } }
+    }
+    const live = this.ctx.agents.get(id)
+    if (live !== undefined) return await borrow(live)
+    if (this.ctx.sessions.get(id) !== undefined) {
+      throw Object.assign(new Error(`游戏会话 ${id} 已挂载但没有可用 Agent，无法安全接管`), { code: 'GAME_SESSION_WITHOUT_AGENT' })
+    }
     try {
       const handle = await this.ctx.agents.resume({
         resumeSessionId: id,
-        agentOptions: { provider: selection.provider, model: selection.model, maxTokens: COMPANION_MAX_TOKENS },
+        signal: this.lifecycle.signal,
+        agentOptions,
         setup: this.setupAgent(selection),
       })
-      await handle.agent.whenIdle()
+      // Factory publication is the ownership boundary. Do not wait here before
+      // returning the disposer to the lease coordinator.
       return handle
     } catch (resumeError) {
-      // A reconnect can race the prior socket's asynchronous AgentHandle disposal.
-      // Never fall straight through to create while that old Session is still registered.
-      if (this.ctx.agents.get(id) !== undefined || this.ctx.sessions.get(id) !== undefined) {
-        await this.waitForSessionRelease(id)
-        const handle = await this.ctx.agents.resume({
-          resumeSessionId: id,
-          agentOptions: { provider: selection.provider, model: selection.model, maxTokens: COMPANION_MAX_TOKENS },
-          setup: this.setupAgent(selection),
-        })
-        await handle.agent.whenIdle()
-        return handle
-      }
+      reportRuntimeError(resumeError, { stage: 'agent.session.resume', sessionId, gameId: this.adapter?.gameId, provider: selection.provider, model: selection.model })
+      this.lifecycle.signal.throwIfAborted()
+      const raced = this.ctx.agents.get(id)
+      if (raced !== undefined) return await borrow(raced)
+      if (!isMissingSession(resumeError, sessionId)) throw resumeError
       this.ctx.logger.debug(`xiaotangyuan-game: no persisted Session ${id}; creating it`)
       this.ctx.logger.debug(resumeError)
       return await this.createAgent(selection, id)
@@ -291,11 +342,14 @@ export class GameAgentSession {
   }
 
   private async ensureAgent(selection: ModelSelection, saveId?: string): Promise<AgentHandle> {
+    this.lifecycle.signal.throwIfAborted()
     const sessionId = persistentGameSessionId(this.adapter, saveId)
-    const key = `${selection.provider}\u0000${selection.model}\u0000${sessionId}`
-    if (this.handle !== undefined && !(
+    const key = `${selection.provider}\u0000${selection.model}\u0000${selection.reasoningEffort ?? ''}\u0000${sessionId}`
+    if (this.handle !== undefined && this.lease?.current() === true
+      && this.ctx.agents.get(this.handle.agent.session.id) === this.handle.agent && !(
       this.selection?.provider !== selection.provider
       || this.selection.model !== selection.model
+      || this.selection.reasoningEffort !== selection.reasoningEffort
       || this.persistentSessionId !== sessionId
     )) return this.handle
     if (this.ensureAgentTask !== undefined) {
@@ -304,25 +358,48 @@ export class GameAgentSession {
       return await this.ensureAgent(selection, saveId)
     }
     const task = (async () => {
-      if (this.handle !== undefined && (
-      this.selection?.provider !== selection.provider
-      || this.selection.model !== selection.model
-      || this.persistentSessionId !== sessionId
-      )) {
-        await this.handle.dispose()
-        this.handle = undefined
+      await this.lease?.release()
+      this.handle = undefined
+      this.lease = undefined
+      this.lifecycle.signal.throwIfAborted()
+      const lease = await sessionOwnership<AgentHandle>(this.ctx.root).acquire(
+        sessionId, this, this.lifecycle.signal,
+        async () => {
+          const value = await this.resumeOrCreateAgent(selection, sessionId)
+          return { value, close: async () => {
+            try { await value.dispose() }
+            catch (error) {
+              reportRuntimeError(error, { stage: 'agent.session.release', sessionId, gameId: this.adapter?.gameId })
+              throw error
+            }
+          } }
+        },
+        () => { this.lifecycle.abort(new Error('游戏连接已由新连接接管')); this.cancel() },
+      )
+      this.lease = lease
+      try {
+        this.lifecycle.signal.throwIfAborted()
+        this.ctx.sessionTitle.rename(lease.value.agent.session, companionSessionTitle(this.adapter))
+        await this.ctx.sessions.flush(lease.value.agent.session)
+        this.lifecycle.signal.throwIfAborted()
+        this.handle = lease.value
+        this.selection = selection
+        this.persistentSessionId = sessionId
+        publishProductDiagnostic({ kind: 'game-session.lifecycle', sessionId, gameId: this.adapter?.gameId, detail: { phase: 'ready', provider: selection.provider, model: selection.model } })
+        return this.handle
+      } catch (error) {
+        await lease.release()
+        this.lease = undefined
+        throw error
       }
-      this.handle = await this.resumeOrCreateAgent(selection, sessionId)
-      this.selection = selection
-      this.persistentSessionId = sessionId
-      this.ctx.sessionTitle.rename(this.handle.agent.session, companionSessionTitle(this.adapter))
-      await this.ctx.sessions.flush(this.handle.agent.session)
-      return this.handle
     })()
     this.ensureAgentTask = task
     this.ensureAgentKey = key
     try {
       return await task
+    } catch (error) {
+      reportRuntimeError(error, { stage: 'agent.session.initialize', sessionId, gameId: this.adapter?.gameId, provider: selection.provider, model: selection.model })
+      throw error
     } finally {
       if (this.ensureAgentTask === task) {
         this.ensureAgentTask = undefined
@@ -355,15 +432,18 @@ export class GameAgentSession {
       }
     }
     const pruned = pruneHistoricalImages(handle.agent.session)
+    pruneHistoricalProjectileState(handle.agent.session)
     const prunedTurns = keepRecentConversationTurns(handle.agent.session, 2)
     const firstSeq = handle.agent.session.seq
     if (this.activeStreams.has(sessionId)) throw new Error('当前游戏会话仍在处理上一条请求')
     const modelStarted = performance.now()
     const externalWorkRequest = mode === 'normal' && obviousExternalWorkRequest(request.text)
+    const learningRequest = mode !== 'compose' && this.adapter?.gameId === 'dont-starve-together'
+      && /学习|学会|练习|\blearn\b/i.test(request.text)
     const accumulator = new StreamingReplyAccumulator(
       interactionId,
       modelStarted,
-      source === 'compose' || externalWorkRequest || this.progress === undefined
+      source === 'compose' || externalWorkRequest || learningRequest || this.progress === undefined
         ? undefined
         : update => this.progress?.({ ...update, source }),
     )
@@ -379,8 +459,29 @@ export class GameAgentSession {
         workContext,
       ),
     }]
-    content.push({ type: 'image', attachment: image })
+    if (image !== undefined) content.push({ type: 'image', attachment: image })
+    if (this.skills && this.adapter) {
+      const availableSkills = this.skills.store.list(this.adapter.gameId)
+      content.push({ type: 'text', text: `当前已保存的技能（实时）：${JSON.stringify(availableSkills.map(skill => ({ id: skill.id, name: skill.name, description: skill.description, triggers: skill.triggers, version: skill.version, composable: skill.verified === true })))}。已有技能直接执行，不要重复新建；只有 composable=true 的固定版本能作为子技能调用，接口不清楚时先 inspect。` })
+    }
+    const taskAcceptance = acceptanceForGameTask(this.adapter?.gameId, request.text)
+    if (taskAcceptance) content.push({ type: 'text', text: `任务层已固定成功条件（源码不能降低条件）：${JSON.stringify(taskAcceptance)}` })
+    this.learningIntent.begin(sessionId, request.text, mode === 'compose')
+    this.learningBudget.begin(sessionId, taskAcceptance)
+    if (learningRequest) this.learningSessions.add(sessionId)
+    const learningDeadline = learningRequest ? setTimeout(() => {
+      const current = this.learningBudget.outcome(sessionId)
+      if (current?.success !== true) this.learningBudget.record(sessionId, {
+        success: false, learned: false, skillId: current?.skillId ?? 'unknown',
+        traceJson: current?.traceJson ?? '[]', error: '本次学习等待超时，已取消',
+      })
+      handle.agent.cancel({ kind: 'hook', reason: 'skill-learning-deadline' })
+    }, 90_000) : undefined
     try {
+      if (learningRequest && source !== 'compose') {
+        const acknowledgement = '我来试着学一下，做成功后再记住。'
+        this.progress?.({ interactionId, delta: acknowledgement, text: acknowledgement, elapsedMs: 0, source })
+      }
       if (pruned.images > 0) {
         this.ctx.logger.info(
           `xiaotangyuan context-prune session=${sessionId} messages=${pruned.messages} images=${pruned.images} bytes=${pruned.bytes}`,
@@ -396,13 +497,28 @@ export class GameAgentSession {
         source: { kind: 'user' },
       }))
       await handle.agent.whenIdle()
+      assertGameTurnSucceeded(handle.agent.session.events, firstSeq)
+      if (learningRequest) {
+        await continueLearningRevisions(this.learningBudget, sessionId, async instruction => {
+          const revisionFirstSeq = handle.agent.session.seq
+          handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: instruction }],
+            source: { kind: 'plugin', plugin: 'xiaotangyuan-skill-repair' } }))
+          await handle.agent.whenIdle()
+          assertGameTurnSucceeded(handle.agent.session.events, revisionFirstSeq)
+        })
+      }
       await this.ctx.sessions.flush(handle.agent.session)
 
+      assertGameTurnSucceeded(handle.agent.session.events, firstSeq)
+
       const generatedReply = latestAssistantText(handle.agent.session.events, firstSeq)
-      const reply = externalWorkRequest
+      const skillOutcome = this.learningBudget.outcome(sessionId)
+      const reply = learningRequest || skillOutcome !== undefined ? learningOutcomeReply(skillOutcome) : externalWorkRequest
         ? emptyReplyFallback(request.text)
         : generatedReply === '' ? emptyReplyFallback(request.text) : generatedReply
       if (generatedReply === '') {
+        publishProductDiagnostic({ kind: 'game-agent.latency', sessionId, interactionId,
+          detail: { phase: 'empty-reply', firstSeq, lastSeq: handle.agent.session.seq, eventTypes: handle.agent.session.events.filter(event => event.seq >= firstSeq).map(event => event.type).slice(-20).join(',') } })
         this.ctx.logger.warn(`xiaotangyuan-game: model produced no public text for interaction ${interactionId}; using a player-facing fallback`)
       }
       return {
@@ -414,7 +530,12 @@ export class GameAgentSession {
         agentWaitMs: performance.now() - modelStarted,
       }
     } catch (error) {
+      if (learningRequest || this.learningBudget.outcome(sessionId) !== undefined) {
+        this.ctx.logger.warn(error)
+        return { reply: learningOutcomeReply(this.learningBudget.outcome(sessionId)), sessionId, agentWaitMs: performance.now() - modelStarted }
+      }
       const partialReply = latestAssistantText(handle.agent.session.events, firstSeq) || accumulator.currentText()
+      reportRuntimeError(error, { stage: 'agent.model.reply', sessionId, interactionId, source, gameId: this.adapter?.gameId, provider: this.selection?.provider, model: this.selection?.model, recovered: partialReply !== '' })
       if (partialReply !== '') {
         this.ctx.logger.warn(`xiaotangyuan-game: model request failed after public text started for interaction ${interactionId}; preserving the partial public reply`)
         this.ctx.logger.warn(error)
@@ -429,6 +550,10 @@ export class GameAgentSession {
       }
       throw error
     } finally {
+      clearTimeout(learningDeadline)
+      this.learningIntent.end(sessionId)
+      this.learningBudget.end(sessionId)
+      this.learningSessions.delete(sessionId)
       accumulator.close()
       this.activeStreams.delete(sessionId)
     }
@@ -439,6 +564,7 @@ export class GameAgentSession {
     mode: 'normal' | 'retry' | 'compose',
     source: InteractionSource | 'compose',
   ): Promise<{ reply: string, sessionId: string, interactionId: string }> {
+    this.lifecycle.signal.throwIfAborted()
     const interactionId = randomUUID()
     const started = performance.now()
     const externalWorkRequest = mode === 'normal' && obviousExternalWorkRequest(request.text)
@@ -455,15 +581,23 @@ export class GameAgentSession {
       }
     }
     const longTermMemory = mode === 'compose' ? undefined : this.memory?.recall(this.adapter, request)
-    const input = await this.multimodal.prepareProcess(this.adapter?.processId, AbortSignal.timeout(10_000))
+    const input = await this.multimodal.prepareProcess(this.adapter?.processId, AbortSignal.timeout(10_000)).catch(error => {
+      reportRuntimeError(error, { stage: 'agent.vision.prepare', interactionId, source, gameId: this.adapter?.gameId })
+      throw error
+    })
+    if (mode === 'normal') gameContextHistory.record(persistentGameSessionId(this.adapter, request.context?.saveId), this.adapter, { ...request, text: '' }, input.image)
     const prepared = performance.now()
     const ephemeral = mode === 'compose'
-    const handle = ephemeral
-      ? await this.createAgent(input.selection)
-      : await this.ensureAgent(input.selection, request.context?.saveId)
+    const handle = await (ephemeral
+      ? this.createAgent(input.selection)
+      : this.ensureAgent(input.selection, request.context?.saveId)).catch(error => {
+        reportRuntimeError(error, { stage: 'agent.session.ready', interactionId, source, gameId: this.adapter?.gameId, provider: input.selection.provider, model: input.selection.model })
+        throw error
+      })
     const agentReady = performance.now()
     try {
       const result = await this.run(handle, request, input.image, mode, interactionId, source, longTermMemory)
+      this.lifecycle.signal.throwIfAborted()
       const firstText = result.firstTextMs === undefined ? 'none' : Math.round(result.firstTextMs)
       this.ctx.logger.info(
         `xiaotangyuan latency interaction=${interactionId} game=${this.adapter?.gameId ?? 'unknown'} source=${source} model=${input.selection.provider}/${input.selection.model} selectionMs=${Math.round(input.timing.modelSelectionMs)} captureMs=${Math.round(input.timing.captureMs)} attachmentMs=${Math.round(input.timing.attachmentMs)} agentReadyMs=${Math.round(agentReady - prepared)} firstTextMs=${firstText} agentWaitMs=${Math.round(result.agentWaitMs)} totalMs=${Math.round(performance.now() - started)}`,
@@ -525,12 +659,17 @@ export class GameAgentSession {
   }
 
   cancel(): void {
-    this.handle?.agent.cancel({ kind: 'user' })
+    if (this.handle !== undefined && this.activeStreams.has(String(this.handle.agent.session.id))) {
+      this.handle.agent.cancel({ kind: 'user' })
+    }
   }
 
   async dispose(): Promise<void> {
+    this.lifecycle.abort(new Error('游戏连接已关闭'))
+    this.cancel()
     await this.ensureAgentTask?.catch(() => undefined)
-    await this.handle?.dispose()
+    await this.lease?.release()
+    this.lease = undefined
     this.handle = undefined
     this.selection = undefined
     this.persistentSessionId = undefined

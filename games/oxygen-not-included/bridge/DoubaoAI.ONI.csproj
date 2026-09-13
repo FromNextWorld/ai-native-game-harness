@@ -8,6 +8,7 @@
     <GameManagedDir Condition="'$(GameManagedDir)' == ''">E:\steam\steamapps\common\OxygenNotIncluded\OxygenNotIncluded_Data\Managed</GameManagedDir>
     <Deterministic>true</Deterministic>
     <DebugType>portable</DebugType>
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>
@@ -24,6 +25,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
     <None Include="assets\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="config.template.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="mod.yaml" CopyToOutputDirectory="PreserveNewest" />

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { reportRuntimeError } from '../runtime/error-diagnostics.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { WorkOrchestratorService } from '@qimidandapigu/dsh-work-orchestrator'
 import WebSocket, { WebSocketServer, type RawData } from 'ws'
@@ -14,14 +15,17 @@ import {
   type GameChatContext,
 } from '../protocol/game.js'
 import { failure, parseRpcRequest, success, type RpcRequest } from '../protocol/json-rpc.js'
-import { GameAgentSession } from '../runtime/agent/game-agent-session.js'
+import { GameAgentSession, persistentGameSessionId } from '../runtime/agent/game-agent-session.js'
+import { actionReceipt, classifyGameAction, gameActionCatalog, swordAction } from '../runtime/agent/game-action-policy.js'
+import { runSwordFormation, supportsPreviewHandoff, supportsChopSweep, supportsSwordPower } from '../runtime/tasks/sword-formation.js'
 import { MultimodalRouter } from '../runtime/multimodal/multimodal-router.js'
-import type { VoiceInteractionHandler } from '../runtime/speech/speech-controller.js'
+import { stripSpeechFormatting, type VoiceInteractionHandler } from '../runtime/speech/speech-controller.js'
 import type { ResolvedConfig } from '../config.js'
 import type { MemoryService } from '../runtime/memory/memory-service.js'
 import type { SkillService } from '../runtime/skills/skill-service.js'
 import type { SkillValue } from '../runtime/skills/contracts.js'
 import { normalizeGameContext } from '../runtime/context/game-context.js'
+import { projectileStopMessage } from '../runtime/context/projectile-live-state.js'
 
 function normalizeContextObservation(context: GameChatContext | undefined, adapter: AdapterHello | undefined): void {
   if (context?.observation !== undefined) context.observation = normalizeGameContext(context.observation, adapter).value
@@ -41,6 +45,17 @@ export async function playPresentedSpeech(
 }
 
 export function playerFacingVoiceFailure(message: string): string {
+  if (/\bASR_QUOTA\b/.test(message)) return '语音识别服务的额度不足，暂时听不到你的话。请检查语音账户额度。'
+  if (/\bASR_AUTH\b/.test(message)) return '语音识别凭据未通过验证，请检查桌面语音设置；重复说话暂时无法解决。'
+  if (/\bASR_CLOCK\b/.test(message)) return '语音识别校验时间失败，请检查提供识别服务的电脑或服务器时间是否准确。'
+  if (/\bASR_CONFIGURATION\b/.test(message)) return '语音识别配置或服务权限不正确，请检查语音服务设置。'
+  if (/\bASR_PROTOCOL\b/.test(message)) return '这次没有收到完整可靠的识别结果，我没有执行动作。请再说一次。'
+  if (/\bASR_EMPTY\b/.test(message)) return '这次没有听清，请按住说话键，说完再松开。'
+  if (/\bASR_BUSY\b/.test(message)) return '语音识别服务现在繁忙，请稍等片刻再说。'
+  if (/\bASR_PROVIDER\b/.test(message)) return '语音识别服务返回了错误，我没有执行动作。请稍后再试。'
+  if (/\bASR_CANCELLED\b/.test(message)) return '这次语音已取消，没有执行动作。'
+  if (/\bASR_NETWORK\b/.test(message)) return '语音识别连接中断了，我没有执行动作。请检查网络后再说一次。'
+  if (/\bASR_TIMEOUT\b/.test(message)) return '语音识别等待太久，已停止本次识别。请稍后再试。'
   if (/fetch failed|network|socket|econn|enotfound|connection/i.test(message)) {
     return '网络刚才有点不稳，我没能回答出来。请再问我一次吧。'
   }
@@ -73,6 +88,29 @@ export function globalPushToTalkProcessIds(adapters: readonly (AdapterHello | un
     .filter(adapter => adapter?.gameId !== 'oxygen-not-included')
     .map(adapter => adapter?.processId)
     .filter((value): value is number => value !== undefined))]
+}
+
+export function isSwordRecall(text: string): boolean {
+  const normalized = text.replace(/[\s，。！？、,.!?]/g, '').replace(/^小汤圆/, '')
+  return /^(收回剑阵|收起剑阵|停止剑阵|崽崽回来|收回崽崽|爷爷回去|爷爷歇会儿|停止浇地)(吧|呀|啊)?$/.test(normalized)
+}
+
+/**
+ * The media host needs every connected game process for window capture and
+ * in-process voice I/O. ONI still keeps its own Q key; excluding it here only
+ * made its process unavailable for the screenshot path.
+ */
+export function mediaHostProcessIds(adapters: readonly (AdapterHello | undefined)[]): number[] {
+  return [...new Set(adapters
+    .map(adapter => adapter?.processId)
+    .filter((value): value is number => value !== undefined))]
+}
+
+export function shouldWarmCompanionSession(
+  currentSaveId: string | undefined,
+  candidateSaveId: string | undefined,
+): candidateSaveId is string {
+  return candidateSaveId !== undefined && candidateSaveId !== currentSaveId
 }
 
 export function matchPostReplyVoiceCommand(
@@ -108,6 +146,7 @@ interface ConnectionState {
   session?: GameAgentSession
   latestObservation?: Record<string, unknown>
   latestSaveId?: string
+  warmupSaveId?: string
   queue: Promise<void>
   lastInteractionAt: number
   proactiveInFlight: boolean
@@ -148,6 +187,16 @@ export class GameGateway implements VoiceInteractionHandler {
     private readonly stopRecording: (processId: number) => boolean = () => false,
     private readonly adapterProtocolUrl: string = 'ws://127.0.0.1:33245/adapter',
   ) {}
+
+  private warmCompanionSession(state: ConnectionState, saveId: string | undefined): void {
+    if (state.session === undefined || !shouldWarmCompanionSession(state.warmupSaveId, saveId)) return
+    state.warmupSaveId = saveId
+    void state.session.warmup(saveId).catch(error => {
+      if (state.warmupSaveId === saveId) state.warmupSaveId = undefined
+      this.ctx.logger.warn('xiaotangyuan-game: 陪聊 Session 预热失败；首次对话时会自动重试')
+      this.ctx.logger.warn(error)
+    })
+  }
 
   async start(retryDelaysMs: readonly number[] = [300, 700, 1_500, 3_000]): Promise<void> {
     if (this.server !== undefined) return
@@ -225,7 +274,10 @@ export class GameGateway implements VoiceInteractionHandler {
     socket.on('message', (data) => {
       if (this.handleAdapterResponse(state, data)) return
       state.queue = state.queue
-        .then(() => this.onMessage(state, data))
+        .then(() => {
+          if (!this.connections.has(state) || socket.readyState !== WebSocket.OPEN) return
+          return this.onMessage(state, data)
+        })
         .catch(error => {
           console.error('[dsh-xiaotangyuan-game] request processing failed', error)
         })
@@ -257,6 +309,7 @@ export class GameGateway implements VoiceInteractionHandler {
         await this.dispatch(state, request)
       } catch (error) {
         this.ctx.logger.warn('xiaotangyuan-game: 适配器通知处理失败')
+        reportRuntimeError(error, { stage: 'gateway.notification', gameId: state.adapter?.gameId, processId: state.adapter?.processId })
         this.ctx.logger.warn(error)
       }
       return
@@ -266,6 +319,7 @@ export class GameGateway implements VoiceInteractionHandler {
       this.send(state.socket, success(request.id, result))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      reportRuntimeError(error, { stage: 'gateway.rpc', requestId: String(request.id), gameId: state.adapter?.gameId, processId: state.adapter?.processId })
       this.send(state.socket, failure(request.id, -32000, message))
     }
   }
@@ -289,6 +343,7 @@ export class GameGateway implements VoiceInteractionHandler {
           this.feedbackEnabled,
           update => {
             if (update.source !== 'voice') {
+              const playerFacingUpdate = { ...update, delta: stripSpeechFormatting(update.delta) }
               if (!state.streamingInteractions.has(update.interactionId)) {
                 state.streamingInteractions.add(update.interactionId)
                 this.notify(state, 'assistant.text.start', {
@@ -296,9 +351,9 @@ export class GameGateway implements VoiceInteractionHandler {
                   source: update.source,
                 })
               }
-              this.notify(state, 'assistant.text.delta', update)
+              this.notify(state, 'assistant.text.delta', playerFacingUpdate)
               if (state.adapter?.capabilities?.includes('assistant.text-stream') !== true) {
-                this.notify(state, 'assistant.delta', update)
+                this.notify(state, 'assistant.delta', playerFacingUpdate)
               }
             }
             if (update.source === 'voice' && state.adapter?.processId !== undefined) {
@@ -311,8 +366,9 @@ export class GameGateway implements VoiceInteractionHandler {
           update => {
             if (!this.connections.has(state) || state.socket.readyState !== WebSocket.OPEN) return
             const interactionId = randomUUID()
+            const playerFacingText = stripSpeechFormatting(update.text)
             this.notify(state, 'assistant.present', {
-              text: update.text,
+              text: playerFacingText,
               source: 'work',
               workSessionId: update.workSessionId,
               title: update.title,
@@ -320,11 +376,11 @@ export class GameGateway implements VoiceInteractionHandler {
               status: update.status,
               ...(update.codexThreadId === undefined ? {} : { codexThreadId: update.codexThreadId }),
             })
-            this.finishTextStream(state, interactionId, update.text, 'work')
+            this.finishTextStream(state, interactionId, playerFacingText, 'work')
             if (update.source === 'voice' && state.adapter?.processId !== undefined) {
               const processId = state.adapter.processId
               state.speechQueue = state.speechQueue.then(() => playPresentedSpeech(
-                () => this.speak(update.text, AbortSignal.timeout(120_000)),
+                () => this.speak(playerFacingText, AbortSignal.timeout(120_000)),
                 () => this.speechStarted(processId, interactionId),
                 () => this.speechFinished(processId, interactionId),
               )).catch(error => {
@@ -334,10 +390,10 @@ export class GameGateway implements VoiceInteractionHandler {
             }
           },
         )
-        void state.session.warmup(state.latestSaveId).catch(error => {
-          this.ctx.logger.warn('xiaotangyuan-game: 陪聊 Session 预热失败；首次对话时会自动重试')
-          this.ctx.logger.warn(error)
-        })
+        // Some games connect from their title screen before a real save identity exists.
+        // Warming a synthetic "default" session there leaves an empty duplicate in ChatList,
+        // while the first in-world request correctly switches to the actual save session.
+        this.warmCompanionSession(state, state.latestSaveId)
         this.publishProcessTargets()
         return { accepted: true, protocolVersion: '1.1' }
       }
@@ -347,11 +403,21 @@ export class GameGateway implements VoiceInteractionHandler {
         if (state.session === undefined) throw new Error('adapter.hello must be sent before chat.send')
         this.markInteraction(state)
         const chat = readGameChat(request.params)
+        if (state.adapter?.gameId === 'stardew-valley' && isSwordRecall(chat.text)) {
+          state.postReplyAction?.abort(new Error('玩家收回剑阵'))
+          state.session.cancel()
+          const interactionId = randomUUID()
+          const value = await this.callAdapterAtom(state, 'stardew.projectiles_cancel', {}, AbortSignal.timeout(3000)) as { remaining?: number; state?: string } | undefined
+          const confirmed = value?.remaining === 0 && ['idle', 'canceled', 'completed', 'expired', 'failed'].includes(value.state ?? '')
+          const reply = confirmed ? projectileStopMessage(value, /爷爷|浇地/.test(chat.text) ? '爷爷已经停下，回去了。' : '崽崽剑阵已收回。') : '还没有收到收回确认，请再说一次停止命令。'
+          this.finishTextStream(state, interactionId, reply, 'chat')
+          return { reply, sessionId: persistentGameSessionId(state.adapter, state.latestSaveId), interactionId }
+        }
         normalizeContextObservation(chat.context, state.adapter)
         if (chat.context?.saveId !== undefined) state.latestSaveId = chat.context.saveId
         if (chat.context?.observation !== undefined) state.latestObservation = chat.context.observation
         const result = await state.session.ask(chat)
-        this.finishTextStream(state, result.interactionId, result.reply, 'chat')
+        this.finishTextStream(state, result.interactionId, stripSpeechFormatting(result.reply), 'chat')
         this.schedulePostReplyAction(state, chat.text, result.reply, result.interactionId)
         return result
       }
@@ -363,13 +429,14 @@ export class GameGateway implements VoiceInteractionHandler {
         if (retry.context?.saveId !== undefined) state.latestSaveId = retry.context.saveId
         if (retry.context?.observation !== undefined) state.latestObservation = retry.context.observation
         const result = await state.session.retry(retry.context)
-        this.finishTextStream(state, result.interactionId, result.reply, 'retry')
-        this.notify(state, 'assistant.present', { text: result.reply, source: 'retry' })
+        const playerFacingReply = stripSpeechFormatting(result.reply)
+        this.finishTextStream(state, result.interactionId, playerFacingReply, 'retry')
+        this.notify(state, 'assistant.present', { text: playerFacingReply, source: 'retry' })
         const processId = state.adapter?.processId
         state.speechQueue = state.speechQueue.then(() => processId === undefined
-          ? this.speak(result.reply, AbortSignal.timeout(120_000))
+          ? this.speak(playerFacingReply, AbortSignal.timeout(120_000))
           : playPresentedSpeech(
-              () => this.speak(result.reply, AbortSignal.timeout(120_000)),
+              () => this.speak(playerFacingReply, AbortSignal.timeout(120_000)),
               () => this.speechStarted(processId, result.interactionId),
               () => this.speechFinished(processId, result.interactionId),
             )).catch(error => {
@@ -435,7 +502,10 @@ export class GameGateway implements VoiceInteractionHandler {
       case 'state.update': {
         state.latestObservation = normalizeGameContext(readStateUpdate(request.params), state.adapter).value
         const saveId = readStateUpdateSaveId(request.params)
-        if (saveId !== undefined) state.latestSaveId = saveId
+        if (saveId !== undefined) {
+          state.latestSaveId = saveId
+          this.warmCompanionSession(state, saveId)
+        }
         this.memory?.observeSession(state.memorySessionKey, state.adapter, {
           text: 'state heartbeat',
           context: {
@@ -495,11 +565,28 @@ export class GameGateway implements VoiceInteractionHandler {
     args: Record<string, SkillValue>,
     signal: AbortSignal,
   ): Promise<unknown> {
+    try {
+      return await this.executeAdapterAtom(state, atom, args, signal)
+    } catch (error) {
+      reportRuntimeError(error, { stage: 'adapter.atom.execute', atom, gameId: state.adapter?.gameId, processId: state.adapter?.processId })
+      throw error
+    }
+  }
+
+  private async executeAdapterAtom(
+    state: ConnectionState,
+    atom: string,
+    args: Record<string, SkillValue>,
+    signal: AbortSignal,
+  ): Promise<unknown> {
     const declared = state.adapter?.atoms?.some(definition => definition.name === atom) === true
       || state.adapter?.capabilities?.includes(atom) === true
     if (!declared) throw new Error(`Adapter 未声明原子能力：${atom}`)
     if (state.socket.readyState !== WebSocket.OPEN) throw new Error('游戏 Adapter 未连接')
     const id = randomUUID()
+    const leased = state.adapter?.capabilities?.includes('game.atom.lease-v1') === true
+    // DST's lease is renewed by the adapter, never by the language model.
+    const expiresAtUnix = (Date.now() + 30_000) / 1000
     return await new Promise<unknown>((resolve, reject) => {
       const cleanup = () => {
         clearTimeout(timer)
@@ -507,13 +594,15 @@ export class GameGateway implements VoiceInteractionHandler {
         state.pendingAdapterRequests.delete(id)
       }
       const onAbort = () => {
+        if (leased) this.send(state.socket, { jsonrpc: '2.0', method: 'game.atom.cancel', params: { commandId: id } })
         cleanup()
         reject(signal.reason instanceof Error ? signal.reason : new Error('技能执行已取消'))
       }
       const timer = setTimeout(() => {
+        if (leased) this.send(state.socket, { jsonrpc: '2.0', method: 'game.atom.cancel', params: { commandId: id } })
         cleanup()
         reject(new Error(`游戏原子能力超时：${atom}`))
-      }, 15_000)
+      }, leased ? 35_000 : 15_000)
       state.pendingAdapterRequests.set(id, {
         resolve: value => { cleanup(); resolve(value) },
         reject: error => { cleanup(); reject(error) },
@@ -525,7 +614,7 @@ export class GameGateway implements VoiceInteractionHandler {
       }
       this.send(state.socket, {
         jsonrpc: '2.0', id, method: 'game.atom.execute',
-        params: { atom, arguments: args },
+        params: { atom, arguments: args, ...(leased ? { commandId: id, expiresAtUnix } : {}) },
       })
     })
   }
@@ -564,15 +653,16 @@ export class GameGateway implements VoiceInteractionHandler {
       }
       const result = await state.session.compose({ text: PROACTIVE_PROMPT, context })
       if (!this.connections.has(state) || state.socket.readyState !== WebSocket.OPEN) return
-      this.notify(state, 'assistant.present', { text: result.reply, source: 'proactive' })
-      this.finishTextStream(state, result.interactionId, result.reply, 'proactive')
+      const playerFacingReply = stripSpeechFormatting(result.reply)
+      this.notify(state, 'assistant.present', { text: playerFacingReply, source: 'proactive' })
+      this.finishTextStream(state, result.interactionId, playerFacingReply, 'proactive')
       try {
         const processId = state.adapter?.processId
         if (processId === undefined) {
-          await this.speak(result.reply, AbortSignal.timeout(120_000))
+          await this.speak(playerFacingReply, AbortSignal.timeout(120_000))
         } else {
           await playPresentedSpeech(
-            () => this.speak(result.reply, AbortSignal.timeout(120_000)),
+            () => this.speak(playerFacingReply, AbortSignal.timeout(120_000)),
             () => this.speechStarted(processId, result.interactionId),
             () => this.speechFinished(processId, result.interactionId),
           )
@@ -590,7 +680,7 @@ export class GameGateway implements VoiceInteractionHandler {
   }
 
   private publishProcessTargets(): void {
-    this.processTargetsChanged(globalPushToTalkProcessIds(
+    this.processTargetsChanged(mediaHostProcessIds(
       [...this.connections].map(connection => connection.adapter),
     ))
   }
@@ -615,17 +705,39 @@ export class GameGateway implements VoiceInteractionHandler {
     }
   }
 
+  /** A transcription preview is display-only; never enter session.ask or action routing. */
+  recognitionPartial(processId: number, transcript: string, stopped: boolean): void {
+    const connection = this.connectionForProcess(processId)
+    if (connection !== undefined) this.notify(connection, 'assistant.status', {
+      status: stopped ? 'recognizing' : 'recording', transcript, partial: true,
+    })
+  }
+
   async respond(processId: number, transcript: string, signal: AbortSignal): Promise<{
     reply: string
     speechPlayed: boolean
     sessionId: string
     interactionId: string
     gameId: string
+    afterPlayback?: () => void
   }> {
     const connection = this.connectionForProcess(processId)
     if (connection?.session === undefined) throw new Error('前台游戏没有连接到小汤圆 Gateway')
     signal.throwIfAborted()
     this.markInteraction(connection)
+    // Preserve the installed Profile's emergency stop before any model queue.
+    if (connection.adapter?.gameId === 'stardew-valley' && isSwordRecall(transcript)) {
+      connection.postReplyAction?.abort(new Error('玩家收回剑阵'))
+      connection.session.cancel()
+      const interactionId = randomUUID()
+      const value = await this.callAdapterAtom(connection, 'stardew.projectiles_cancel', {}, AbortSignal.any([signal, AbortSignal.timeout(3000)])) as { remaining?: number; state?: string } | undefined
+      const confirmed = value?.remaining === 0 && ['idle', 'canceled', 'completed', 'expired', 'failed'].includes(value.state ?? '')
+      const reply = confirmed ? projectileStopMessage(value, /爷爷|浇地/.test(transcript) ? '爷爷已经停下，回去了。' : '崽崽剑阵已收回。') : '还没有收到收回确认，请再说一次停止命令。'
+      this.notify(connection, 'assistant.present', { text: reply, source: 'voice' })
+      const speechPlayed = await this.finishSpeechReply(processId, interactionId, reply)
+      if (speechPlayed) this.speechFinished(processId, interactionId)
+      return { reply, speechPlayed, sessionId: persistentGameSessionId(connection.adapter, connection.latestSaveId), interactionId, gameId: 'stardew-valley' }
+    }
     const context: GameChatContext = {
       ...(connection.latestSaveId === undefined ? {} : { saveId: connection.latestSaveId }),
       ...(connection.latestObservation === undefined ? {} : { observation: connection.latestObservation }),
@@ -636,33 +748,40 @@ export class GameGateway implements VoiceInteractionHandler {
       this.notify(connection, 'assistant.status', { status: 'thinking', transcript })
       const result = await connection.session.ask({ text: transcript, context }, 'voice')
       signal.throwIfAborted()
-      // The in-game caption is a primary response channel, not a side effect of
-      // TTS playback. Publish the complete answer as soon as the model turn
-      // finishes so a slow or missing speech-sync event cannot leave players
-      // with audio only.
-      this.notify(connection, 'assistant.present', { text: result.reply, source: 'voice' })
-      this.finishTextStream(connection, result.interactionId, result.reply, 'voice')
-      this.schedulePostReplyAction(connection, transcript, result.reply, result.interactionId)
+      const playerFacingReply = stripSpeechFormatting(result.reply)
       await connection.speechQueue
       signal.throwIfAborted()
-      const speechPlayed = await this.finishSpeechReply(processId, result.interactionId, result.reply)
+      const speechPlayed = await this.finishSpeechReply(processId, result.interactionId, playerFacingReply)
       signal.throwIfAborted()
+      if (!speechPlayed) {
+        this.notify(connection, 'assistant.present', { text: playerFacingReply, source: 'voice' })
+      }
+      this.finishTextStream(connection, result.interactionId, playerFacingReply, 'voice')
       if (speechPlayed) this.speechFinished(processId, result.interactionId)
+      const afterPlayback = () => {
+        if (signal.aborted || this.connectionForProcess(processId) !== connection) return
+        this.schedulePostReplyAction(connection, transcript, result.reply, result.interactionId)
+      }
+      if (speechPlayed) afterPlayback()
       return {
         reply: result.reply,
         speechPlayed,
         sessionId: result.sessionId,
         interactionId: result.interactionId,
         gameId: connection.adapter?.gameId ?? 'unknown',
+        ...(speechPlayed ? {} : { afterPlayback }),
       }
     } finally {
       signal.removeEventListener('abort', cancelAgent)
     }
   }
 
-  failed(processId: number, message: string): void {
+  failed(processId: number, message: string, errorId?: string): void {
     const connection = this.connectionForProcess(processId)
-    if (connection !== undefined) this.notify(connection, 'assistant.error', { message: playerFacingVoiceFailure(message) })
+    const id = errorId ?? reportRuntimeError(new Error(message), { stage: 'gateway.voice.failure', processId, gameId: connection?.adapter?.gameId }).errorId
+    if (connection !== undefined) this.notify(connection, 'assistant.error', {
+      message: `${playerFacingVoiceFailure(message)}（错误编号：${id.slice(0, 8)}）`, errorId: id,
+    })
   }
 
   private send(socket: WebSocket, payload: unknown): void {
@@ -680,17 +799,29 @@ export class GameGateway implements VoiceInteractionHandler {
     reply: string,
     interactionId: string,
   ): void {
-    const atom = matchPostReplyVoiceCommand(connection.adapter, transcript, reply)
-    if (atom === undefined) return
+    if (!gameActionCatalog(connection.adapter).length) return
     connection.postReplyAction?.abort(new Error('新的游戏动作已取代上一动作'))
     const controller = new AbortController()
     connection.postReplyAction = controller
     queueMicrotask(() => {
-      void this.runPostReplyAction(connection, atom, interactionId, controller).catch(error => {
-        this.ctx.logger.warn(`xiaotangyuan-game: 回复已完成，但后置游戏动作 ${atom} 执行失败`)
+      void (async () => {
+        const atom = await this.selectPostReplyAction(connection, transcript, controller.signal)
+        controller.signal.throwIfAborted()
+        if (atom !== undefined) await this.runPostReplyAction(connection, atom, interactionId, controller)
+      })().catch(error => {
+        if (controller.signal.aborted) return
+        const failure = reportRuntimeError(error, { stage: 'game.action.classify', interactionId, gameId: connection.adapter?.gameId })
+        this.notify(connection, 'assistant.error', { message: `这次动作没能确认执行，未自动重试。（错误编号：${failure.errorId.slice(0, 8)}）`, errorId: failure.errorId })
+        this.ctx.logger.warn('回复已完成，但后置游戏动作判断或执行失败；未自动重试')
         this.ctx.logger.warn(error)
+      }).finally(() => {
+        if (connection.postReplyAction === controller) connection.postReplyAction = undefined
       })
     })
+  }
+
+  private async selectPostReplyAction(connection: ConnectionState, transcript: string, signal: AbortSignal): Promise<string | undefined> {
+    return classifyGameAction(this.ctx, connection.adapter, transcript, await this.multimodal.selectModel(signal), signal)
   }
 
   private async runPostReplyAction(
@@ -701,16 +832,15 @@ export class GameGateway implements VoiceInteractionHandler {
   ): Promise<void> {
     try {
       this.notify(connection, 'assistant.status', { status: 'acting' })
-      const value = await this.callAdapterAtom(connection, atom, {}, controller.signal)
-      const record = typeof value === 'object' && value !== null && !Array.isArray(value)
-        ? value as Record<string, unknown>
-        : undefined
-      const succeeded = typeof record?.success === 'boolean'
-        ? record.success
-        : typeof record?.ok === 'boolean' ? record.ok : true
-      const detail = typeof record?.reply === 'string' && record.reply.trim() !== ''
-        ? record.reply.trim()
-        : succeeded ? '动作已执行。' : '游戏拒绝了这次动作。'
+      const sword = swordAction(atom)
+      const value = sword === undefined ? await this.callAdapterAtom(connection, atom, {}, controller.signal)
+        : await runSwordFormation(sword.mode, sword.count, (name, args, signal) => this.callAdapterAtom(connection, name, args, signal), controller.signal,
+          undefined, { reusePreview: supportsPreviewHandoff(connection.adapter?.atoms), chopSweep: supportsChopSweep(connection.adapter?.atoms), powerBoost: supportsSwordPower(connection.adapter?.atoms) })
+      controller.signal.throwIfAborted() // do not publish a stale completion over a newer voice turn
+      const receipt = actionReceipt(value)
+      const succeeded = receipt.success
+      const detail = sword !== undefined && value && typeof value === 'object' && 'message' in value && typeof value.message === 'string' ? value.message : receipt.text
+      if (!succeeded) reportRuntimeError(new Error(detail), { stage: `adapter.action.${receipt.state}`, atom, interactionId, gameId: connection.adapter?.gameId })
       this.notify(connection, 'assistant.action.result', {
         interactionId,
         atom,

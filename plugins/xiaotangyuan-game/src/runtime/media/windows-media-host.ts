@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { reportRuntimeError } from '../error-diagnostics.js'
 import { access } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
@@ -8,6 +9,8 @@ import type { ResolvedConfig } from '../../config.js'
 import type { BinaryAsset } from '../providers/contracts.js'
 
 export type MediaHostEvent = {
+  type: 'host.stopped'
+} | {
   type: 'ready'
   version: string
 } | {
@@ -94,7 +97,8 @@ export class WindowsMediaHost {
     const executable = this.executablePath()
     try {
       await access(executable)
-    } catch {
+    } catch (error) {
+      reportRuntimeError(error, { stage: 'media.executable.access' })
       this.ctx.logger.warn('xiaotangyuan-game: Windows 媒体服务不存在：%s', executable)
       return false
     }
@@ -102,6 +106,10 @@ export class WindowsMediaHost {
     const child = spawn(executable, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     this.child = child
     const lines = createInterface({ input: child.stdout })
+    child.on('error', error => {
+      reportRuntimeError(error, { stage: 'media.process.start' })
+      this.onLine(JSON.stringify({ type: 'host.stopped' }))
+    })
     lines.on('line', (line) => this.onLine(line))
     child.stderr.on('data', data => {
       const message = data.toString().trim()
@@ -109,10 +117,12 @@ export class WindowsMediaHost {
     })
     child.on('exit', (code, signal) => {
       if (this.child === child) this.child = undefined
+      this.onLine(JSON.stringify({ type: 'host.stopped' }))
       this.rejectPendingCaptures(new Error('Windows 媒体服务已退出'))
       this.rejectPendingPlaybacks(new Error('Windows 媒体服务已退出'))
       if (code !== 0 && code !== null) {
         this.ctx.logger.warn('xiaotangyuan-game: 媒体服务退出，code=%s signal=%s', code, signal)
+        reportRuntimeError(new Error(`Media host exited: code=${code} signal=${signal}`), { stage: 'media.process.exit' })
       }
     })
     return true
@@ -164,6 +174,7 @@ export class WindowsMediaHost {
     }
     for (const listener of this.listeners) {
       Promise.resolve(listener(event)).catch(error => {
+        reportRuntimeError(error, { stage: 'media.listener' })
         this.ctx.logger.warn('xiaotangyuan-game: 媒体事件处理失败')
         this.ctx.logger.warn(error)
       })

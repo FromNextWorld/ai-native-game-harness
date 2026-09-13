@@ -1,4 +1,5 @@
 import { buildGameViewModel, safeStatePreview } from './game-view-models.mjs'
+import { voiceReadinessText } from './voice-readiness.mjs'
 import { buildDiagnosticBundle, diagnosticFilename, traceMatchesFilter } from './diagnostics.mjs'
 
 const pages = {
@@ -124,6 +125,7 @@ function render() {
   setMeasuredMetric('#metric-tts', latestVoice?.detail?.ttsMs)
   setMeasuredMetric('#metric-voice-total', latestVoice?.detail?.totalMs)
   $('#runtime-name').textContent = `${runtime.label ?? 'Harness Runtime'} ${runtime.status === 'online' ? '在线' : '连接中'}`
+  $('#voice-readiness').textContent = voiceReadinessText(runtime.voiceReadiness, runtime.status === 'online')
   $('#runtime-meta').textContent = runtime.sessionId ? `Session ${runtime.sessionId}` : 'Protocol 1.0 · Local runtime'
   $('#runtime-agent').textContent = runtime.label ?? runtime.kind ?? 'Harness Runtime'
   $('#runtime-session').textContent = runtime.sessionId ?? 'Standalone Session'

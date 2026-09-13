@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { assertTurnSucceeded } from './turn-outcome.js'
+import { registerWorkGameContextTool, type WorkGameContext } from './work-game-context.js'
+import { captureWorkFiles, evidencePathKey, evidenceStatements, fileStamp, hasPowerShellResearch, type WorkFileSnapshot } from './work-evidence.js'
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { extname, isAbsolute, relative, resolve } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
@@ -70,6 +73,7 @@ export interface WorkContextSnapshot {
 }
 
 export interface CompletedCompanionTurn {
+  gameContext?: WorkGameContext
   companionSessionId: string
   playerText: string
   companionReply: string
@@ -285,7 +289,7 @@ export function requiresArtifactWrite(instruction: string): boolean {
   const commitsArtifact = /(?:生成|制作|创建|导出|保存|落盘|打开|预览).{0,20}(?:html?|网页|网站|页面|pptx?|幻灯片|演示文稿|markdown|\.md\b|文档|报告|文章|推文|表格|xlsx?|csv|代码|程序|图片|海报|视频|文件)/i.test(instruction)
     || /(?:html?|网页|网站|页面|pptx?|幻灯片|演示文稿|markdown|\.md\b|文档|报告|文章|推文|表格|xlsx?|csv|代码|程序|图片|海报|视频|文件).{0,20}(?:生成|制作|创建|导出|保存|落盘|打开|预览)/i.test(instruction)
   if (planning && !commitsArtifact) return false
-  const action = /(?:做|写|生成|制作|创建|开发|修改|优化|迭代|重做|改成|导出|保存|落盘|create|build|write|generate|make|modify|edit|export|save)/i.test(instruction)
+  const action = /(?:做|写|生成|制作|创建|开发|修改|优化|迭代|重做|改成|改短|改长|改一下|调整|导出|保存|落盘|create|build|write|generate|make|modify|edit|export|save)/i.test(instruction)
   return artifact && action
 }
 
@@ -351,9 +355,20 @@ function expectedArtifactExtensions(instruction: string): Set<string> {
   return extensions
 }
 
+/** A previous title supplies artifact type, never stale actions for a follow-up. */
+export function workVerificationInstruction(instruction: string, title: string): string {
+  if (expectedArtifactExtensions(instruction).size > 0) return instruction
+  const formats = [...expectedArtifactExtensions(title)]
+  return formats.length === 0 ? instruction : `${instruction}\n参考成果类型：${formats.join(' ')} 文件`
+}
+
 function isPathInside(root: string, filePath: string): boolean {
   const pathFromRoot = relative(root, filePath)
-  return pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))
+  if (pathFromRoot.startsWith('..') || isAbsolute(pathFromRoot)) return false
+  try {
+    // Snapshots deliberately skip links; do not accept linked paths as new files.
+    return evidencePathKey(realpathSync(filePath)) === evidencePathKey(resolve(realpathSync(root), pathFromRoot))
+  } catch { return false }
 }
 
 function isValidOfficeArtifact(filePath: string, expected: ReadonlySet<string>): boolean {
@@ -391,19 +406,20 @@ function candidatePaths(call: { name: string; arguments: string }, root: string)
     return direct.map(filePath => resolve(root, filePath))
   }
   if (call.name !== 'pwsh') return []
-  const command = typeof args.command === 'string' ? args.command : ''
-  if (!/(?:Set-Content|Out-File|Export-Csv|SaveAs|WriteAll(?:Bytes|Text)|Copy-Item|Move-Item)/i.test(command)) return []
-  const quoted = [...command.matchAll(/["']([^"']+\.[A-Za-z0-9]{1,8})["']/g)].map(match => match[1] ?? '')
-  return [...direct, ...quoted].filter(Boolean).map(filePath => resolve(root, filePath))
+  const commands = evidenceStatements(typeof args.command === 'string' ? args.command : '')
+    .filter(command => /^(?:(?:Set-Content|Out-File|Export-Csv|Copy-Item|Move-Item)\s|\[(?:System\.)?IO\.File\]::WriteAll(?:Bytes|Text)\s*\()/i.test(command))
+  return commands.flatMap(command => [...command.matchAll(/["']([^"']+\.[A-Za-z0-9]{1,8})["']/g)])
+    .map(match => resolve(root, match[1]!))
 }
 
 function openedTargets(calls: ReadonlyArray<{ name: string; arguments: string }>, root: string): string[] {
   return calls.flatMap(call => {
     if (call.name !== 'pwsh') return []
     const command = parseToolArguments(call.arguments).command
-    if (typeof command !== 'string' || !/(?:Start-Process|Invoke-Item|(?:^|[;\s])ii\s)/i.test(command)) return []
-    return [...command.matchAll(/["']([^"']+)["']/g)]
-      .map(match => match[1] ?? '')
+    if (typeof command !== 'string') return []
+    return evidenceStatements(command)
+      .map(statement => statement.match(/^(?:Start-Process|Invoke-Item|ii)\s+(?:-(?:FilePath|LiteralPath|Path)\s+)?(["'])([^"']+)\1\s*$/i))
+      .map(match => match?.[2] ?? '')
       .filter(Boolean)
       .map(target => resolve(root, target))
   })
@@ -419,7 +435,7 @@ function isResearchToolCall(call: { name: string; arguments: string }): boolean 
   if (call.name !== 'pwsh') return false
   const command = parseToolArguments(call.arguments).command
   if (typeof command !== 'string') return false
-  return /(?:Invoke-WebRequest|Invoke-RestMethod|Start-BitsTransfer|(?:System\.Net\.)?(?:WebClient|WebRequest|HttpWebRequest)|System\.Net\.Http\.HttpClient|\.Download(?:String|Data|File)\s*\(|(?:^|[;&|\s])curl(?:\.exe)?(?:\s|$)|(?:^|[;&|\s])wget(?:\.exe)?(?:\s|$))/i.test(command)
+  return hasPowerShellResearch(command)
 }
 
 export function verifyWorkExecution(
@@ -427,16 +443,18 @@ export function verifyWorkExecution(
   firstSeq: number,
   workspace: string,
   instruction: string,
+  before?: WorkFileSnapshot,
 ): WorkExecutionEvidence {
   const root = resolve(workspace)
   const calls = successfulToolCalls(events, firstSeq)
   const expected = expectedArtifactExtensions(instruction)
   const artifactPaths = [...new Set(calls.flatMap(call => candidatePaths(call, root)))]
-    .filter(filePath => isPathInside(root, filePath) && isValidOfficeArtifact(filePath, expected))
+    .filter(filePath => isPathInside(root, filePath) && isValidOfficeArtifact(filePath, expected)
+      && (before === undefined || before.get(evidencePathKey(filePath)) !== fileStamp(filePath)))
   const targets = openedTargets(calls, root)
   const opened = targets.some(target => {
     if (!isPathInside(root, target) || !existsSync(target)) return false
-    if (artifactPaths.length === 0) return statSync(target).isFile()
+    if (artifactPaths.length === 0) return isValidOfficeArtifact(target, expected)
     return artifactPaths.some(filePath => filePath.toLowerCase() === target.toLowerCase())
   })
   const researched = calls.some(isResearchToolCall)
@@ -459,6 +477,7 @@ export interface WorkOrchestratorDependencies {
 
 /** Generic post-turn work orchestration with a visible DSH control Session. */
 export class WorkOrchestratorService extends Service {
+  private readonly gameContexts = new Map<string, WorkGameContext>()
   private readonly tasks = new Set<Promise<void>>()
   private readonly active = new Map<string, ActiveWorkSession>()
   private readonly failedRestores = new Map<string, WorkSessionLink>()
@@ -499,6 +518,7 @@ export class WorkOrchestratorService extends Service {
   /** Enqueue recognition after the caller's answer without delaying that answer. */
   scheduleTurn(turn: CompletedCompanionTurn): void {
     if (!this.config.enabled || this.closing) return
+    turn = { ...turn, gameContext: turn.gameContext ? structuredClone(turn.gameContext) : undefined }
     const task = Promise.resolve()
       .then(async () => this.processTurn(turn))
       .catch(async error => {
@@ -618,6 +638,10 @@ export class WorkOrchestratorService extends Service {
         ].filter((line): line is string => line !== undefined && line !== '').join('\n')
 
     const run = work.runQueue.then(async () => {
+      // Bind the snapshot when its queued task starts; later chat must not replace
+      // the evidence underneath a running worker.
+      if (turn.gameContext) this.gameContexts.set(turn.companionSessionId, turn.gameContext)
+      else this.gameContexts.delete(turn.companionSessionId)
       work.running = true
       this.saveLink(turn.companionSessionId, work, 'active')
       await this.setWorkStatus(work, '执行中')
@@ -696,10 +720,11 @@ export class WorkOrchestratorService extends Service {
     return intent
   }
 
-  private setupWorker(selection: ModelSelection): (agentCtx: Context) => void {
+  private setupWorker(selection: ModelSelection, companionSessionId?: string): (agentCtx: Context) => void {
     return (agentCtx) => {
       const selected: ModelSelectionRef = { current: selection, assembled: undefined }
       installModelSelection(agentCtx, selected)
+      registerWorkGameContextTool(agentCtx, () => companionSessionId === undefined ? undefined : this.gameContexts.get(companionSessionId))
       agentCtx.inject(['tools'], (scoped) => {
         const toolNames = scoped.tools.schemas().map(tool => tool.name)
         assertRequiredWorkTools(toolNames)
@@ -752,7 +777,7 @@ export class WorkOrchestratorService extends Service {
       const handle = await this.agentRegistryForWorker().resume({
         resumeSessionId: SessionId(link.workerSessionId),
         agentOptions: { provider: link.selection.provider, model: link.selection.model },
-        setup: this.setupWorker(link.selection),
+        setup: this.setupWorker(link.selection, turn.companionSessionId),
       })
       await handle.agent.whenIdle()
       this.ctx.permissionPresets.set(handle.agent.session, 'danger-full-access')
@@ -793,7 +818,7 @@ export class WorkOrchestratorService extends Service {
       sessionId: SessionId(sessionId),
       meta: { cwd: this.config.codex.workingDirectory },
       agentOptions: { provider: selection.provider, model: selection.model },
-      setup: this.setupWorker(selection),
+      setup: this.setupWorker(selection, turn.companionSessionId),
     })
     await handle.agent.whenIdle()
     this.ctx.permissionPresets.set(handle.agent.session, 'danger-full-access')
@@ -821,7 +846,7 @@ export class WorkOrchestratorService extends Service {
     instruction: string,
     explicitlyRequestsCodex: boolean,
   ): Promise<string> {
-    let workerPrompt = prompt
+    let workerPrompt = prompt + '\n如需游戏日常素材，先用 work_game_context 核对游戏/存档和采集时间，按需载入截图；一般办公无需读取图片。不要从共享目录猜测本次游戏素材。'
     if (work.codexThreadId !== undefined || explicitlyRequestsCodex) {
       if (work.codexThreadId === undefined) {
         work.codexThreadId = await this.getCodexClient().startThread(work.title)
@@ -836,7 +861,7 @@ export class WorkOrchestratorService extends Service {
         '请执行本轮被授权的工作，并返回可公开给 Work Session 的进度或结果；不要冒充游戏陪伴角色。',
       ].join('\n'))
       workerPrompt = [
-        prompt,
+        workerPrompt,
         '',
         'WORK_DELEGATION_RESULT_V1',
         '以下内容来自玩家明确指定的 Codex App Server 执行器。你仍是权威的 Work DSH Session：请结合自己的持续上下文，检查并向玩家汇报，不要把内部协议原样输出。',
@@ -846,7 +871,7 @@ export class WorkOrchestratorService extends Service {
     } else {
       work.executor = 'dsh'
     }
-    const reply = await this.runWorkerSession(work, workerPrompt, `${work.title}\n${instruction}`, work.executor === 'dsh')
+    const reply = await this.runWorkerSession(work, workerPrompt, workVerificationInstruction(instruction, work.title), work.executor === 'dsh')
     return reply
   }
 
@@ -857,11 +882,13 @@ export class WorkOrchestratorService extends Service {
     verifyExecution = false,
   ): Promise<string> {
     const firstSeq = work.handle.agent.session.seq
+    const before = verifyExecution ? captureWorkFiles(this.config.codex.workingDirectory) : undefined
     work.handle.agent.followup(createUserMessage({
       content: [{ type: 'text', text: workerPrompt }],
       source: { kind: 'plugin', plugin: 'dsh-work-orchestrator', form: 'instructions' },
     }))
     await work.handle.agent.whenIdle()
+    assertTurnSucceeded(work.handle.agent.session.events, firstSeq)
     let reply = assistantText(work.handle.agent.session.events, firstSeq)
     if (reply === '') throw new Error('Worker DSH Session returned no public text')
     if (!verifyExecution || verificationInstruction === undefined) return reply
@@ -872,9 +899,11 @@ export class WorkOrchestratorService extends Service {
         firstSeq,
         this.config.codex.workingDirectory,
         verificationInstruction,
+        before,
       )
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
+      const retryFirstSeq = work.handle.agent.session.seq
       work.handle.agent.followup(createUserMessage({
         content: [{
           type: 'text',
@@ -883,18 +912,21 @@ export class WorkOrchestratorService extends Service {
             `自动验收未通过：${reason}`,
             '请在同一工作 Session 内立即纠正一次：使用现有工作工具完成缺失操作，并只在真实成功后报告。',
             '生成成果必须保存到共享工作目录；要求打开时必须打开本次已验证成果；要求联网调研时必须实际调用联网搜索。',
+            '保存优先使用 write/edit，并实际创建或修改文件；打开请单独执行简单命令 Start-Process -FilePath "成果绝对路径"，不要只输出命令、使用 WhatIf 或将打开操作藏在条件分支中。',
           ].join('\n'),
         }],
         source: { kind: 'plugin', plugin: 'dsh-work-orchestrator', form: 'instructions' },
       }))
       await work.handle.agent.whenIdle()
-      reply = assistantText(work.handle.agent.session.events, firstSeq)
+      assertTurnSucceeded(work.handle.agent.session.events, retryFirstSeq)
+      reply = assistantText(work.handle.agent.session.events, retryFirstSeq)
       if (reply === '') throw new Error('Worker DSH Session returned no public text after verification retry')
       evidence = verifyWorkExecution(
         work.handle.agent.session.events,
         firstSeq,
         this.config.codex.workingDirectory,
         verificationInstruction,
+        before,
       )
     }
     return evidence.artifactPaths.length === 0

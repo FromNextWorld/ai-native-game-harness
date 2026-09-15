@@ -14,6 +14,7 @@ import { SignedFeedbackClient } from './runtime/feedback/signed-feedback-client.
 import { CapabilityRegistry } from './runtime/capabilities.js'
 import { SpeechController } from './runtime/speech/speech-controller.js'
 import { VolcengineSpeechProvider } from './runtime/speech/volcengine-speech-provider.js'
+import { IflytekSpeechRecognitionProvider } from './runtime/speech/iflytek-speech-provider.js'
 import { registerGameTools } from './tools/game-mod-tools.js'
 import { MemoryService } from './runtime/memory/memory-service.js'
 import { registerMemoryTools } from './tools/memory-tools.js'
@@ -26,6 +27,13 @@ export const provide = 'xiaotangyuanLearning'
 export const inject = ['agentDefaultModel', 'agents', 'attachments', 'credentials', 'llm', 'sessions', 'sessionTitle', 'systemPrompt', 'tools', 'workOrchestrator']
 
 import { registerConfiguredSpeechExtension } from './runtime/providers/speech-extension.js'
+
+export function registerBuiltInSpeechCapabilities(ctx: Context, capabilities: CapabilityRegistry, config: ReturnType<typeof resolveConfig>['speech']): void {
+  const volcengine = new VolcengineSpeechProvider(ctx, config)
+  capabilities.register('speech.transcribe', volcengine)
+  capabilities.register('speech.synthesize', volcengine)
+  capabilities.register('speech.transcribe', new IflytekSpeechRecognitionProvider(ctx, config))
+}
 
 export function apply(ctx: Context, config: Config = {}): void {
   const resolved = resolveConfig(config)
@@ -66,9 +74,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       resolved.adapterProtocolUrl,
     )
     const capabilities = new CapabilityRegistry()
-    const speechProvider = new VolcengineSpeechProvider(ctx, resolved.speech)
-    capabilities.register('speech.transcribe', speechProvider)
-    capabilities.register('speech.synthesize', speechProvider)
+    registerBuiltInSpeechCapabilities(ctx, capabilities, resolved.speech)
     await registerConfiguredSpeechExtension(ctx, capabilities, config.speech)
     await gateway.start()
     speech = new SpeechController(ctx, resolved.speech, media, gateway, capabilities)

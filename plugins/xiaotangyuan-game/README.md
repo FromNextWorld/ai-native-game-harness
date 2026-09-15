@@ -58,6 +58,9 @@ Gateway 只允许 `127.0.0.1`、`localhost` 或 `::1`，不会暴露到局域网
 | `speech.recognitionProvider` | `auto` | 单独选择 `speech.transcribe` 实现，优先于 `speech.provider` |
 | `speech.synthesisProvider` | `auto` | 单独选择 `speech.synthesize` 实现，优先于 `speech.provider` |
 | `speech.credentialRef` | `VOLCENGINE_API_KEY` | DSH 凭据名称，不是 Key 内容 |
+| `speech.iflytekAppIdCredentialRef` | `IFLYTEK_APP_ID` | 科大讯飞应用 ID 的 DSH 凭据名称 |
+| `speech.iflytekApiKeyCredentialRef` | `IFLYTEK_API_KEY` | 科大讯飞 API Key 的 DSH 凭据名称 |
+| `speech.iflytekApiSecretCredentialRef` | `IFLYTEK_API_SECRET` | 科大讯飞 API Secret 的 DSH 凭据名称 |
 | `speech.asrResourceId` | `volc.bigasr.auc` | 当前火山 ASR 资源 |
 | `speech.asrFastResourceId` | `volc.bigasr.auc_turbo` | 流式 ASR 不可用时的单请求极速识别资源 |
 | `speech.asrStreamingResourceId` | `volc.bigasr.sauc.duration` | 实时 PCM 流式识别资源 |
@@ -95,7 +98,7 @@ feedback:
 
 运行时按 `vision.observe`、`speech.transcribe`、`speech.synthesize` 等能力注册和选择实现，不把 ASR、TTS 与游戏 Agent 强制绑定到同一家厂商。自动模式会跳过未配置或不可用的实现；高级配置可以让 ASR 与 TTS 分别选择不同 Provider。
 
-Provider 接口是厂商无关的，但 `0.7.6` 实际内置的语音实现只有 `VolcengineSpeechProvider`。新增厂商时只需实现相应能力接口并注册，不能修改任何游戏 Adapter。
+公共标准版内置 `VolcengineSpeechProvider` 和 `IflytekSpeechRecognitionProvider`。设置 `speech.recognitionProvider: iflytek` 并在 DSH 凭据库配置 `IFLYTEK_APP_ID`、`IFLYTEK_API_KEY`、`IFLYTEK_API_SECRET` 后，即可直连科大讯飞流式 ASR；TTS 可继续独立使用火山实现。商业版的托管路由、账户和计费不在公共插件中。
 
 所有真实密钥通过 `ctx.credentials.resolve(ref)` 在操作时解析。插件配置只保存凭据引用，不缓存或持久化秘密。
 

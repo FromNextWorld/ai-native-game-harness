@@ -20,6 +20,9 @@ export interface SpeechConfig {
   recognitionProvider?: string
   synthesisProvider?: string
   credentialRef?: string
+  iflytekAppIdCredentialRef?: string
+  iflytekApiKeyCredentialRef?: string
+  iflytekApiSecretCredentialRef?: string
   asrResourceId?: string
   asrFastResourceId?: string
   asrStreamingResourceId?: string
@@ -102,6 +105,9 @@ export interface ResolvedConfig {
     recognitionProvider: string
     synthesisProvider: string
     credentialRef: string
+    iflytekAppIdCredentialRef: string
+    iflytekApiKeyCredentialRef: string
+    iflytekApiSecretCredentialRef: string
     asrResourceId: string
     asrFastResourceId: string
     asrStreamingResourceId: string
@@ -268,6 +274,9 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
       recognitionProvider: config.speech?.recognitionProvider ?? config.speech?.provider ?? 'auto',
       synthesisProvider: config.speech?.synthesisProvider ?? config.speech?.provider ?? 'auto',
       credentialRef: config.speech?.credentialRef ?? 'VOLCENGINE_API_KEY',
+      iflytekAppIdCredentialRef: config.speech?.iflytekAppIdCredentialRef ?? 'IFLYTEK_APP_ID',
+      iflytekApiKeyCredentialRef: config.speech?.iflytekApiKeyCredentialRef ?? 'IFLYTEK_API_KEY',
+      iflytekApiSecretCredentialRef: config.speech?.iflytekApiSecretCredentialRef ?? 'IFLYTEK_API_SECRET',
       asrResourceId: config.speech?.asrResourceId ?? 'volc.bigasr.auc',
       asrFastResourceId: config.speech?.asrFastResourceId ?? 'volc.bigasr.auc_turbo',
       asrStreamingResourceId: config.speech?.asrStreamingResourceId ?? 'volc.bigasr.sauc.duration',
